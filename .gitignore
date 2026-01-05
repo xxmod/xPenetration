@@ -1,0 +1,35 @@
+# Binaries
+bin/
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Config files with secrets
+configs/server.yaml
+configs/client.yaml
+
+# Keep example configs
+!configs/server.example.yaml
+!configs/client.example.yaml
+
+# Go
+vendor/
+go.sum
+
+# Test
+coverage.out
+coverage.html
+
+README.md

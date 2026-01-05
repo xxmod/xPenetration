@@ -1,0 +1,66 @@
+# xPenetration 服务端配置文件
+
+server:
+  # 监听地址
+  listen_addr: "0.0.0.0"
+  # 控制端口（客户端连接此端口）
+  control_port: 7000
+  # Web管理界面端口
+  web_port: 7500
+  # 全局密钥（客户端验证用）
+  secret_key: "your-secret-key-change-me"
+
+# 客户端配置列表
+# 每个客户端可以配置专属密钥和分配的隧道
+clients:
+  # 客户端1：SSH服务穿透
+  - name: "office-pc"
+    # 客户端专属密钥（可选，为空则使用全局密钥）
+    secret_key: ""
+    # 分配给该客户端的隧道
+    tunnels:
+      - name: "ssh"
+        client_port: 22      # 客户端本地SSH端口
+        server_port: 10022   # 服务端暴露端口
+        protocol: "tcp"
+      - name: "rdp"
+        client_port: 3389    # 客户端本地RDP端口
+        server_port: 13389   # 服务端暴露端口
+        protocol: "tcp"
+
+  # 客户端2：Web服务穿透
+  - name: "dev-server"
+    secret_key: "dev-server-secret-key"
+    tunnels:
+      - name: "web"
+        client_port: 80
+        server_port: 10080
+        protocol: "tcp"
+      - name: "web-https"
+        client_port: 443
+        server_port: 10443
+        protocol: "tcp"
+      - name: "dev-api"
+        client_port: 8080
+        server_port: 18080
+        protocol: "tcp"
+
+  # 客户端3：数据库穿透
+  - name: "db-server"
+    secret_key: "db-server-secret-key"
+    tunnels:
+      - name: "mysql"
+        client_port: 3306
+        server_port: 13306
+        protocol: "tcp"
+      - name: "redis"
+        client_port: 6379
+        server_port: 16379
+        protocol: "tcp"
+
+# 日志配置
+log:
+  # 日志级别: debug, info, warn, error
+  level: "info"
+  # 输出位置: stdout 或文件路径
+  output: "stdout"

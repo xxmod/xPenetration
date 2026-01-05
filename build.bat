@@ -1,0 +1,27 @@
+@echo off
+echo Building xPenetration...
+
+:: 创建输出目录
+if not exist "bin" mkdir bin
+
+:: 编译服务端
+echo Building server...
+go build -o bin/xpen-server.exe ./cmd/server
+if %errorlevel% neq 0 (
+    echo Failed to build server
+    exit /b 1
+)
+
+:: 编译客户端
+echo Building client...
+go build -o bin/xpen-client.exe ./cmd/client
+if %errorlevel% neq 0 (
+    echo Failed to build client
+    exit /b 1
+)
+
+echo.
+echo Build completed successfully!
+echo Output:
+echo   bin/xpen-server.exe
+echo   bin/xpen-client.exe

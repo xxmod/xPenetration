@@ -1,0 +1,22 @@
+# xPenetration 客户端配置文件
+
+client:
+  # 服务端地址（IP或域名）
+  server_addr: "your-server.example.com"
+  # 服务端控制端口
+  server_port: 7000
+  # 密钥（需与服务端配置匹配）
+  secret_key: "your-secret-key-change-me"
+  # 客户端名称（需与服务端配置的客户端名称匹配）
+  client_name: "office-pc"
+  # 是否自动重连
+  auto_reconnect: true
+  # 重连间隔（秒）
+  reconnect_interval: 5
+
+# 日志配置
+log:
+  # 日志级别: debug, info, warn, error
+  level: "info"
+  # 输出位置: stdout 或文件路径
+  output: "stdout"

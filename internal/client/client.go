@@ -1,0 +1,399 @@
+package client
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"sync"
+	"time"
+
+	"xpenetration/internal/config"
+	"xpenetration/internal/protocol"
+)
+
+// Client 客户端结构
+type Client struct {
+	config      *config.ClientConnConfig
+	conn        net.Conn
+	clientID    string
+	tunnels     []protocol.Tunnel
+	localConns  map[string]net.Conn // connID -> local connection
+	mu          sync.RWMutex
+	running     bool
+	connected   bool
+	stopChan    chan struct{}
+}
+
+// NewClient 创建新的客户端
+func NewClient(cfg *config.ClientConnConfig) *Client {
+	return &Client{
+		config:     cfg,
+		localConns: make(map[string]net.Conn),
+		stopChan:   make(chan struct{}),
+	}
+}
+
+// Start 启动客户端
+func (c *Client) Start() error {
+	c.running = true
+
+	for c.running {
+		if err := c.connect(); err != nil {
+			log.Printf("[Client] Connection failed: %v", err)
+			if !c.config.Client.AutoReconnect {
+				return err
+			}
+			log.Printf("[Client] Reconnecting in %d seconds...", c.config.Client.ReconnectInterval)
+			time.Sleep(time.Duration(c.config.Client.ReconnectInterval) * time.Second)
+			continue
+		}
+
+		// 处理消息
+		c.handleMessages()
+
+		// 连接断开
+		c.connected = false
+		c.cleanup()
+
+		if !c.running {
+			break
+		}
+
+		if c.config.Client.AutoReconnect {
+			log.Printf("[Client] Reconnecting in %d seconds...", c.config.Client.ReconnectInterval)
+			time.Sleep(time.Duration(c.config.Client.ReconnectInterval) * time.Second)
+		} else {
+			break
+		}
+	}
+
+	return nil
+}
+
+// connect 连接到服务端
+func (c *Client) connect() error {
+	addr := fmt.Sprintf("%s:%d", c.config.Client.ServerAddr, c.config.Client.ServerPort)
+	log.Printf("[Client] Connecting to %s...", addr)
+
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %v", err)
+	}
+
+	c.conn = conn
+
+	// 发送认证请求
+	authMsg, err := protocol.NewAuthRequest(c.config.Client.SecretKey, c.config.Client.ClientName)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to create auth request: %v", err)
+	}
+
+	if err := protocol.SendMessage(conn, authMsg); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to send auth request: %v", err)
+	}
+
+	// 接收认证响应
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	msg, err := protocol.DecodeMessage(conn)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to receive auth response: %v", err)
+	}
+
+	if msg.Type != protocol.MsgTypeAuthResp {
+		conn.Close()
+		return fmt.Errorf("unexpected message type: %d", msg.Type)
+	}
+
+	authResp, err := protocol.ParseAuthResponse(msg.Payload)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to parse auth response: %v", err)
+	}
+
+	if !authResp.Success {
+		conn.Close()
+		return fmt.Errorf("authentication failed: %s", authResp.Message)
+	}
+
+	c.clientID = authResp.ClientID
+	log.Printf("[Client] Authentication successful, client ID: %s", c.clientID)
+
+	// 接收隧道配置
+	msg, err = protocol.DecodeMessage(conn)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to receive tunnel config: %v", err)
+	}
+
+	if msg.Type != protocol.MsgTypeTunnelConfig {
+		conn.Close()
+		return fmt.Errorf("unexpected message type: %d", msg.Type)
+	}
+
+	tunnelConfig, err := protocol.ParseTunnelConfig(msg.Payload)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to parse tunnel config: %v", err)
+	}
+
+	c.tunnels = tunnelConfig.Tunnels
+	conn.SetReadDeadline(time.Time{})
+
+	log.Printf("[Client] Received %d tunnel configurations:", len(c.tunnels))
+	for _, t := range c.tunnels {
+		log.Printf("[Client]   - %s: local port %d -> server port %d", t.Name, t.ClientPort, t.ServerPort)
+	}
+
+	c.connected = true
+
+	// 启动心跳
+	go c.heartbeatLoop()
+
+	return nil
+}
+
+// heartbeatLoop 心跳循环
+func (c *Client) heartbeatLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !c.connected {
+				return
+			}
+			c.sendHeartbeat()
+		case <-c.stopChan:
+			return
+		}
+	}
+}
+
+// sendHeartbeat 发送心跳
+func (c *Client) sendHeartbeat() {
+	msg, err := protocol.NewHeartbeat(time.Now().Unix())
+	if err != nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		protocol.SendMessage(c.conn, msg)
+	}
+}
+
+// handleMessages 处理服务端消息
+func (c *Client) handleMessages() {
+	for c.running && c.connected {
+		msg, err := protocol.DecodeMessage(c.conn)
+		if err != nil {
+			log.Printf("[Client] Failed to read message: %v", err)
+			return
+		}
+
+		switch msg.Type {
+		case protocol.MsgTypeNewConnection:
+			go c.handleNewConnection(msg)
+		case protocol.MsgTypeData:
+			c.handleData(msg)
+		case protocol.MsgTypeDisconnect:
+			c.handleDisconnect(msg)
+		case protocol.MsgTypeHeartbeatAck:
+			// 心跳确认，忽略
+		case protocol.MsgTypeError:
+			c.handleError(msg)
+		default:
+			log.Printf("[Client] Unknown message type: %d", msg.Type)
+		}
+	}
+}
+
+// handleNewConnection 处理新连接请求
+func (c *Client) handleNewConnection(msg *protocol.Message) {
+	nc, err := protocol.ParseNewConnection(msg.Payload)
+	if err != nil {
+		log.Printf("[Client] Failed to parse new connection: %v", err)
+		return
+	}
+
+	log.Printf("[Client] New connection request: %s -> local port %d", nc.ConnID, nc.ClientPort)
+
+	// 连接到本地服务
+	localAddr := fmt.Sprintf("127.0.0.1:%d", nc.ClientPort)
+	localConn, err := net.DialTimeout("tcp", localAddr, 5*time.Second)
+	if err != nil {
+		log.Printf("[Client] Failed to connect to local service %s: %v", localAddr, err)
+		c.sendConnReady(nc.ConnID, false, err.Error())
+		return
+	}
+
+	// 保存本地连接
+	c.mu.Lock()
+	c.localConns[nc.ConnID] = localConn
+	c.mu.Unlock()
+
+	// 发送连接就绪消息
+	c.sendConnReady(nc.ConnID, true, "")
+
+	// 启动本地连接数据转发
+	go c.forwardFromLocal(nc.ConnID, localConn)
+}
+
+// sendConnReady 发送连接就绪消息
+func (c *Client) sendConnReady(connID string, success bool, message string) {
+	msg, err := protocol.NewConnReadyMessage(connID, success, message)
+	if err != nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		protocol.SendMessage(c.conn, msg)
+	}
+}
+
+// forwardFromLocal 从本地连接转发数据到服务端
+func (c *Client) forwardFromLocal(connID string, localConn net.Conn) {
+	defer func() {
+		localConn.Close()
+		c.mu.Lock()
+		delete(c.localConns, connID)
+		c.mu.Unlock()
+
+		// 通知服务端断开连接
+		c.sendDisconnect(connID, "local connection closed")
+	}()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := localConn.Read(buf)
+		if err != nil {
+			return
+		}
+
+		// 发送数据给服务端
+		msg, err := protocol.NewDataMessage(connID, buf[:n])
+		if err != nil {
+			return
+		}
+
+		c.mu.Lock()
+		err = protocol.SendMessage(c.conn, msg)
+		c.mu.Unlock()
+
+		if err != nil {
+			return
+		}
+	}
+}
+
+// sendDisconnect 发送断开连接消息
+func (c *Client) sendDisconnect(connID, reason string) {
+	msg, err := protocol.NewDisconnectMessage(connID, reason)
+	if err != nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		protocol.SendMessage(c.conn, msg)
+	}
+}
+
+// handleData 处理服务端发来的数据
+func (c *Client) handleData(msg *protocol.Message) {
+	dm, err := protocol.ParseDataMessage(msg.Payload)
+	if err != nil {
+		log.Printf("[Client] Failed to parse data message: %v", err)
+		return
+	}
+
+	c.mu.RLock()
+	localConn, exists := c.localConns[dm.ConnID]
+	c.mu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	// 转发数据到本地连接
+	_, err = localConn.Write(dm.Data)
+	if err != nil {
+		log.Printf("[Client] Failed to write to local connection: %v", err)
+		localConn.Close()
+	}
+}
+
+// handleDisconnect 处理断开连接消息
+func (c *Client) handleDisconnect(msg *protocol.Message) {
+	dm, err := protocol.ParseDisconnectMessage(msg.Payload)
+	if err != nil {
+		return
+	}
+
+	c.mu.Lock()
+	if localConn, exists := c.localConns[dm.ConnID]; exists {
+		localConn.Close()
+		delete(c.localConns, dm.ConnID)
+	}
+	c.mu.Unlock()
+}
+
+// handleError 处理错误消息
+func (c *Client) handleError(msg *protocol.Message) {
+	em, err := protocol.ParseErrorMessage(msg.Payload)
+	if err != nil {
+		return
+	}
+	log.Printf("[Client] Server error: [%d] %s", em.Code, em.Message)
+}
+
+// cleanup 清理资源
+func (c *Client) cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 关闭所有本地连接
+	for _, conn := range c.localConns {
+		conn.Close()
+	}
+	c.localConns = make(map[string]net.Conn)
+
+	// 关闭服务端连接
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+}
+
+// Stop 停止客户端
+func (c *Client) Stop() {
+	c.running = false
+	close(c.stopChan)
+	c.cleanup()
+}
+
+// IsConnected 是否已连接
+func (c *Client) IsConnected() bool {
+	return c.connected
+}
+
+// GetTunnels 获取隧道配置
+func (c *Client) GetTunnels() []protocol.Tunnel {
+	return c.tunnels
+}
+
+// GetClientID 获取客户端ID
+func (c *Client) GetClientID() string {
+	return c.clientID
+}
