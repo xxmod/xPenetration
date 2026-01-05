@@ -63,30 +63,40 @@ func main() {
 			log.Fatalf("Failed to load config: %v", err)
 		}
 	} else {
-		// 使用命令行参数
-		if serverAddr == "" {
-			log.Fatal("Server address is required. Use -s <address> or -c <config file>")
-		}
-		if secretKey == "" {
-			log.Fatal("Secret key is required. Use -k <key> or -c <config file>")
-		}
-		if clientName == "" {
-			log.Fatal("Client name is required. Use -n <name> or -c <config file>")
-		}
+		// 尝试自动查找当前目录下的 client.yaml
+		defaultConfigPath := "client.yaml"
+		if _, err := os.Stat(defaultConfigPath); err == nil {
+			cfg, err = config.LoadClientConfig(defaultConfigPath)
+			if err != nil {
+				log.Fatalf("Failed to load config from %s: %v", defaultConfigPath, err)
+			}
+			log.Printf("Using default config file: %s", defaultConfigPath)
+		} else {
+			// 使用命令行参数
+			if serverAddr == "" {
+				log.Fatal("Server address is required. Use -s <address> or -c <config file>")
+			}
+			if secretKey == "" {
+				log.Fatal("Secret key is required. Use -k <key> or -c <config file>")
+			}
+			if clientName == "" {
+				log.Fatal("Client name is required. Use -n <name> or -c <config file>")
+			}
 
-		cfg = &config.ClientConnConfig{
-			Client: config.ClientConnSettings{
-				ServerAddr:        serverAddr,
-				ServerPort:        serverPort,
-				SecretKey:         secretKey,
-				ClientName:        clientName,
-				AutoReconnect:     true,
-				ReconnectInterval: 5,
-			},
-			Log: config.LogSettings{
-				Level:  "info",
-				Output: "stdout",
-			},
+			cfg = &config.ClientConnConfig{
+				Client: config.ClientConnSettings{
+					ServerAddr:        serverAddr,
+					ServerPort:        serverPort,
+					SecretKey:         secretKey,
+					ClientName:        clientName,
+					AutoReconnect:     true,
+					ReconnectInterval: 5,
+				},
+				Log: config.LogSettings{
+					Level:  "info",
+					Output: "stdout",
+				},
+			}
 		}
 	}
 
