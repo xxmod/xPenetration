@@ -29,6 +29,12 @@ const (
 	UDPModeTCP    = "tcp"    // 通过TCP隧道传输UDP（备用方法）
 )
 
+// 原生UDP数据包类型
+const (
+	NativeUDPTypeRegister uint8 = 0 // 注册包（客户端发送给服务端，告知UDP地址）
+	NativeUDPTypeData     uint8 = 1 // 数据包
+)
+
 // GetUDPMode 获取UDP模式，默认为native
 func GetUDPMode(mode string) string {
 	if mode == UDPModeTCP {
@@ -549,4 +555,67 @@ func DecodeNativeUDPPacket(data []byte) (*NativeUDPPacket, error) {
 		RemoteAddr: remoteAddr,
 		Data:       data[offset:],
 	}, nil
+}
+
+// NativeUDPRegisterPacket 原生UDP注册包结构
+// 格式: [1字节类型=0][1字节客户端名长度][客户端名]
+type NativeUDPRegisterPacket struct {
+	ClientName string
+}
+
+// EncodeNativeUDPRegisterPacket 编码UDP注册包
+func EncodeNativeUDPRegisterPacket(clientName string) []byte {
+	nameBytes := []byte(clientName)
+	nameLen := len(nameBytes)
+	if nameLen > 255 {
+		nameLen = 255
+		nameBytes = nameBytes[:255]
+	}
+
+	buf := make([]byte, 2+nameLen)
+	buf[0] = NativeUDPTypeRegister // 类型: 注册
+	buf[1] = byte(nameLen)
+	copy(buf[2:], nameBytes)
+
+	return buf
+}
+
+// DecodeNativeUDPRegisterPacket 解码UDP注册包
+func DecodeNativeUDPRegisterPacket(data []byte) (*NativeUDPRegisterPacket, error) {
+	if len(data) < 2 {
+		return nil, fmt.Errorf("register packet too short: %d bytes", len(data))
+	}
+
+	if data[0] != NativeUDPTypeRegister {
+		return nil, fmt.Errorf("not a register packet: type=%d", data[0])
+	}
+
+	nameLen := int(data[1])
+	if len(data) < 2+nameLen {
+		return nil, fmt.Errorf("register packet too short for name: need %d, have %d", 2+nameLen, len(data))
+	}
+
+	return &NativeUDPRegisterPacket{
+		ClientName: string(data[2 : 2+nameLen]),
+	}, nil
+}
+
+// EncodeNativeUDPDataPacket 编码带类型前缀的UDP数据包
+func EncodeNativeUDPDataPacket(serverPort, clientPort int, remoteAddr string, data []byte) []byte {
+	payload := EncodeNativeUDPPacket(serverPort, clientPort, remoteAddr, data)
+	buf := make([]byte, 1+len(payload))
+	buf[0] = NativeUDPTypeData // 类型: 数据
+	copy(buf[1:], payload)
+	return buf
+}
+
+// DecodeNativeUDPDataPacket 解码带类型前缀的UDP数据包
+func DecodeNativeUDPDataPacket(data []byte) (*NativeUDPPacket, error) {
+	if len(data) < 1 {
+		return nil, fmt.Errorf("data packet too short")
+	}
+	if data[0] != NativeUDPTypeData {
+		return nil, fmt.Errorf("not a data packet: type=%d", data[0])
+	}
+	return DecodeNativeUDPPacket(data[1:])
 }

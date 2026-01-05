@@ -422,6 +422,15 @@ func (c *Client) startNativeUDPTransport() error {
 
 	log.Printf("[Client] Native UDP transport connected to %s", serverUDPAddr)
 
+	// 发送注册包，告知服务端客户端的UDP地址
+	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName)
+	_, err = conn.WriteToUDP(registerPkt, udpAddr)
+	if err != nil {
+		log.Printf("[Client] Warning: Failed to send UDP register packet: %v", err)
+	} else {
+		log.Printf("[Client] Sent UDP register packet to server")
+	}
+
 	// 启动接收服务端UDP数据的goroutine
 	go c.handleNativeUDPFromServer()
 
@@ -445,8 +454,19 @@ func (c *Client) handleNativeUDPFromServer() {
 			return
 		}
 
-		// 解析数据包
-		pkt, err := protocol.DecodeNativeUDPPacket(buf[:n])
+		if n < 1 {
+			continue
+		}
+
+		// 检查数据包类型
+		pktType := buf[0]
+		if pktType != protocol.NativeUDPTypeData {
+			// 忽略非数据包
+			continue
+		}
+
+		// 解析数据包（带类型前缀）
+		pkt, err := protocol.DecodeNativeUDPDataPacket(buf[:n])
 		if err != nil {
 			log.Printf("[Client] Failed to decode native UDP packet: %v", err)
 			continue
@@ -633,8 +653,8 @@ func (c *Client) forwardUDPFromLocal(connInfo *UDPConnInfo) {
 
 		// 根据UDP模式选择发送方式
 		if udpMode == protocol.UDPModeNative && c.nativeUDPConn != nil && c.serverUDPAddr != nil {
-			// 原生UDP传输：直接通过UDP发送给服务端
-			pktData := protocol.EncodeNativeUDPPacket(
+			// 原生UDP传输：直接通过UDP发送给服务端（使用带类型前缀的数据包）
+			pktData := protocol.EncodeNativeUDPDataPacket(
 				serverPort,
 				connInfo.ClientPort,
 				remoteAddr,

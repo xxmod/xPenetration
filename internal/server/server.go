@@ -153,42 +153,68 @@ func (s *Server) handleNativeUDPTransport() {
 			continue
 		}
 
-		// 解析数据包
-		pkt, err := protocol.DecodeNativeUDPPacket(buf[:n])
-		if err != nil {
-			log.Printf("[Server] Failed to decode native UDP packet: %v", err)
+		if n < 1 {
 			continue
 		}
 
-		// 查找对应的UDP监听器
-		s.mu.RLock()
-		udpListener, exists := s.udpListeners[pkt.ServerPort]
-		s.mu.RUnlock()
+		// 检查数据包类型
+		pktType := buf[0]
 
-		if !exists {
-			log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
+		if pktType == protocol.NativeUDPTypeRegister {
+			// 处理注册包
+			regPkt, err := protocol.DecodeNativeUDPRegisterPacket(buf[:n])
+			if err != nil {
+				log.Printf("[Server] Failed to decode UDP register packet: %v", err)
+				continue
+			}
+
+			// 保存客户端的UDP地址
+			s.mu.Lock()
+			s.clientUDPAddrs[regPkt.ClientName] = clientUDPAddr
+			s.mu.Unlock()
+
+			log.Printf("[Server] Registered UDP address for client %s: %s", regPkt.ClientName, clientUDPAddr.String())
 			continue
 		}
 
-		// 更新客户端的UDP地址（用于发送响应）
-		s.mu.Lock()
-		s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
-		s.mu.Unlock()
+		if pktType == protocol.NativeUDPTypeData {
+			// 处理数据包
+			pkt, err := protocol.DecodeNativeUDPDataPacket(buf[:n])
+			if err != nil {
+				log.Printf("[Server] Failed to decode native UDP data packet: %v", err)
+				continue
+			}
 
-		// 查找原始请求的远程地址
-		udpListener.mu.RLock()
-		remoteAddr, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
-		udpListener.mu.RUnlock()
+			// 查找对应的UDP监听器
+			s.mu.RLock()
+			udpListener, exists := s.udpListeners[pkt.ServerPort]
+			s.mu.RUnlock()
 
-		if !exists {
-			log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
-			continue
-		}
+			if !exists {
+				log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
+				continue
+			}
 
-		// 发送响应给外部客户端
-		_, err = udpListener.Conn.WriteToUDP(pkt.Data, remoteAddr)
-		if err != nil {
-			log.Printf("[Server] Failed to send UDP response to external client: %v", err)
+			// 更新客户端的UDP地址（用于发送响应）
+			s.mu.Lock()
+			s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
+			s.mu.Unlock()
+
+			// 查找原始请求的远程地址
+			udpListener.mu.RLock()
+			remoteAddr, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
+			udpListener.mu.RUnlock()
+
+			if !exists {
+				log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
+				continue
+			}
+
+			// 发送响应给外部客户端
+			_, err = udpListener.Conn.WriteToUDP(pkt.Data, remoteAddr)
+			if err != nil {
+				log.Printf("[Server] Failed to send UDP response to external client: %v", err)
+			}
 		}
 	}
 }
@@ -288,8 +314,8 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 
 		// 根据udp_mode选择传输方式
 		if udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil {
-			// 原生UDP传输：直接通过UDP发送给客户端
-			pktData := protocol.EncodeNativeUDPPacket(
+			// 原生UDP传输：直接通过UDP发送给客户端（使用带类型前缀的数据包）
+			pktData := protocol.EncodeNativeUDPDataPacket(
 				udpListener.Tunnel.ServerPort,
 				udpListener.Tunnel.ClientPort,
 				remoteAddrStr,
