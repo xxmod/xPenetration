@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,11 +25,51 @@ jobs:
         with:
           go-version: stable
 
+      # 当推送 tag 时使用 GoReleaser
       - name: Run GoReleaser
+        if: startsWith(github.ref, 'refs/tags/')
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: latest
+          version: '~> v2'
           args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 当推送到分支时，自动创建 tag 并发布
+      - name: Get version from commit
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        id: version
+        run: |
+          # 使用日期和短 commit hash 生成版本号
+          VERSION="v0.0.0-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: |
+          mkdir -p dist
+          # 构建多平台二进制文件
+          GOOS=linux GOARCH=amd64 go build -o dist/xpen-server-linux-amd64 ./cmd/server
+          GOOS=linux GOARCH=amd64 go build -o dist/xpen-client-linux-amd64 ./cmd/client
+          GOOS=windows GOARCH=amd64 go build -o dist/xpen-server-windows-amd64.exe ./cmd/server
+          GOOS=windows GOARCH=amd64 go build -o dist/xpen-client-windows-amd64.exe ./cmd/client
+          GOOS=darwin GOARCH=amd64 go build -o dist/xpen-server-darwin-amd64 ./cmd/server
+          GOOS=darwin GOARCH=amd64 go build -o dist/xpen-client-darwin-amd64 ./cmd/client
+          GOOS=darwin GOARCH=arm64 go build -o dist/xpen-server-darwin-arm64 ./cmd/server
+          GOOS=darwin GOARCH=arm64 go build -o dist/xpen-client-darwin-arm64 ./cmd/client
+
+      - name: Create Release
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            Automated release from commit ${{ github.sha }}
+          draft: false
+          prerelease: true
+          files: |
+            dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
