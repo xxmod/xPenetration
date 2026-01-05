@@ -74,7 +74,7 @@ jobs:
           body: |
             Automated release from commit ${{ github.sha }}
           draft: false
-          prerelease: true
+          prerelease: false
           files: |
             dist/*
         env:
