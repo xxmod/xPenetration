@@ -3,8 +3,10 @@
 server:
   # 监听地址
   listen_addr: "0.0.0.0"
-  # 控制端口（客户端连接此端口）
+  # 控制端口（客户端连接此端口，TCP）
   control_port: 7000
+  # UDP数据传输端口（用于原生UDP隧道，客户端与服务端之间的UDP传输）
+  udp_port: 7001
   # Web管理界面端口
   web_port: 7500
   # 全局密钥（客户端验证用）
@@ -65,15 +67,18 @@ clients:
       - name: "game-udp"
         client_port: 27015    # 游戏服务UDP端口
         server_port: 27015    # 服务端暴露UDP端口
-        protocol: "udp"       # UDP隧道（通过TCP封包传输）
+        protocol: "udp"       # UDP隧道
+        udp_mode: "native"    # UDP传输模式：native（原生UDP，默认）或 tcp（通过TCP封装，备用方法）
       - name: "dns"
         client_port: 53       # DNS服务
         server_port: 10053
         protocol: "udp"
+        udp_mode: "native"    # 推荐使用原生UDP模式，延迟更低
       - name: "voip"
         client_port: 5060     # VoIP SIP端口
         server_port: 15060
         protocol: "udp"
+        udp_mode: "tcp"       # 可选：使用TCP封装（在某些NAT环境下更稳定，但可能丢包）
 
 # 日志配置
 log:

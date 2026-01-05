@@ -20,8 +20,22 @@ const (
 	MsgTypeDisconnect    uint8 = 8  // 断开连接
 	MsgTypeError         uint8 = 9  // 错误消息
 	MsgTypeConnReady     uint8 = 10 // 连接就绪
-	MsgTypeUDPData       uint8 = 11 // UDP数据传输
+	MsgTypeUDPData       uint8 = 11 // UDP数据传输（通过TCP隧道，备用方法）
 )
+
+// UDP模式常量
+const (
+	UDPModeNative = "native" // 原生UDP传输（默认）
+	UDPModeTCP    = "tcp"    // 通过TCP隧道传输UDP（备用方法）
+)
+
+// GetUDPMode 获取UDP模式，默认为native
+func GetUDPMode(mode string) string {
+	if mode == UDPModeTCP {
+		return UDPModeTCP
+	}
+	return UDPModeNative
+}
 
 // Message 通用消息结构
 type Message struct {
@@ -54,6 +68,7 @@ type Tunnel struct {
 	ClientPort int    `json:"client_port" yaml:"client_port"` // 客户端本地端口
 	ServerPort int    `json:"server_port" yaml:"server_port"` // 服务端暴露端口
 	Protocol   string `json:"protocol" yaml:"protocol"`       // tcp/udp
+	UDPMode    string `json:"udp_mode" yaml:"udp_mode"`       // UDP隧道模式: native(原生UDP) 或 tcp(TCP封装,备用)
 }
 
 // NewConnection 新连接通知
@@ -471,4 +486,67 @@ func NewUDPDataMessage(tunnelName string, clientPort int, remoteAddr string, dat
 // ParseUDPDataMessage 解析UDP数据消息（使用二进制解码提高性能）
 func ParseUDPDataMessage(payload []byte) (*UDPDataMessage, error) {
 	return DecodeUDPDataMessageBinary(payload)
+}
+
+// NativeUDPPacket 原生UDP数据包结构（用于服务端-客户端之间的直接UDP传输）
+// 格式: [2字节服务端口][2字节客户端口][1字节地址长度][远程地址][数据]
+type NativeUDPPacket struct {
+	ServerPort int    // 服务端暴露的端口
+	ClientPort int    // 客户端本地端口
+	RemoteAddr string // 外部客户端远程地址（用于响应）
+	Data       []byte // 实际数据
+}
+
+// EncodeNativeUDPPacket 编码原生UDP数据包
+func EncodeNativeUDPPacket(serverPort, clientPort int, remoteAddr string, data []byte) []byte {
+	remoteAddrBytes := []byte(remoteAddr)
+	addrLen := len(remoteAddrBytes)
+	if addrLen > 255 {
+		addrLen = 255
+		remoteAddrBytes = remoteAddrBytes[:255]
+	}
+
+	totalLen := 2 + 2 + 1 + addrLen + len(data)
+	buf := make([]byte, totalLen)
+
+	offset := 0
+	binary.BigEndian.PutUint16(buf[offset:], uint16(serverPort))
+	offset += 2
+	binary.BigEndian.PutUint16(buf[offset:], uint16(clientPort))
+	offset += 2
+	buf[offset] = byte(addrLen)
+	offset++
+	copy(buf[offset:], remoteAddrBytes)
+	offset += addrLen
+	copy(buf[offset:], data)
+
+	return buf
+}
+
+// DecodeNativeUDPPacket 解码原生UDP数据包
+func DecodeNativeUDPPacket(data []byte) (*NativeUDPPacket, error) {
+	if len(data) < 5 {
+		return nil, fmt.Errorf("packet too short: %d bytes", len(data))
+	}
+
+	offset := 0
+	serverPort := int(binary.BigEndian.Uint16(data[offset:]))
+	offset += 2
+	clientPort := int(binary.BigEndian.Uint16(data[offset:]))
+	offset += 2
+	addrLen := int(data[offset])
+	offset++
+
+	if len(data) < offset+addrLen {
+		return nil, fmt.Errorf("packet too short for address: need %d, have %d", offset+addrLen, len(data))
+	}
+	remoteAddr := string(data[offset : offset+addrLen])
+	offset += addrLen
+
+	return &NativeUDPPacket{
+		ServerPort: serverPort,
+		ClientPort: clientPort,
+		RemoteAddr: remoteAddr,
+		Data:       data[offset:],
+	}, nil
 }

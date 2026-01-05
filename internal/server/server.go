@@ -15,12 +15,14 @@ import (
 // Server 服务端结构
 type Server struct {
 	config          *config.ServerConfig
-	clients         map[string]*ClientConn // clientID -> client connection
-	clientsByName   map[string]*ClientConn // clientName -> client connection
-	tunnelListeners map[int]net.Listener   // serverPort -> listener (TCP)
-	udpListeners    map[int]*UDPListener   // serverPort -> UDP listener
-	connections     map[string]*ProxyConn  // connID -> proxy connection
-	controlListener net.Listener           // 控制端口监听器
+	clients         map[string]*ClientConn  // clientID -> client connection
+	clientsByName   map[string]*ClientConn  // clientName -> client connection
+	tunnelListeners map[int]net.Listener    // serverPort -> listener (TCP)
+	udpListeners    map[int]*UDPListener    // serverPort -> UDP listener
+	connections     map[string]*ProxyConn   // connID -> proxy connection
+	controlListener net.Listener            // 控制端口监听器
+	nativeUDPConn   *net.UDPConn            // 原生UDP传输连接（用于与客户端之间的UDP数据传输）
+	clientUDPAddrs  map[string]*net.UDPAddr // clientName -> client UDP address
 	mu              sync.RWMutex
 	running         bool
 }
@@ -68,6 +70,7 @@ func NewServer(cfg *config.ServerConfig) *Server {
 		tunnelListeners: make(map[int]net.Listener),
 		udpListeners:    make(map[int]*UDPListener),
 		connections:     make(map[string]*ProxyConn),
+		clientUDPAddrs:  make(map[string]*net.UDPAddr),
 	}
 }
 
@@ -88,6 +91,11 @@ func (s *Server) Start() error {
 
 	log.Printf("[Server] Control server listening on %s", controlAddr)
 
+	// 启动原生UDP传输监听器（用于与客户端之间的UDP数据传输）
+	if err := s.startNativeUDPListener(); err != nil {
+		log.Printf("[Server] Warning: Failed to start native UDP listener: %v", err)
+	}
+
 	// 启动所有隧道端口监听
 	for _, client := range s.config.Clients {
 		for _, tunnel := range client.Tunnels {
@@ -107,6 +115,82 @@ func (s *Server) Start() error {
 	go s.acceptClients(listener)
 
 	return nil
+}
+
+// startNativeUDPListener 启动原生UDP传输监听器
+func (s *Server) startNativeUDPListener() error {
+	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddr, s.config.Server.UDPPort)
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.nativeUDPConn = conn
+	s.mu.Unlock()
+
+	log.Printf("[Server] Native UDP transport listening on %s", addr)
+
+	go s.handleNativeUDPTransport()
+	return nil
+}
+
+// handleNativeUDPTransport 处理原生UDP传输数据
+func (s *Server) handleNativeUDPTransport() {
+	buf := make([]byte, 65535)
+
+	for s.running {
+		n, clientUDPAddr, err := s.nativeUDPConn.ReadFromUDP(buf)
+		if err != nil {
+			if s.running {
+				log.Printf("[Server] Native UDP read error: %v", err)
+			}
+			continue
+		}
+
+		// 解析数据包
+		pkt, err := protocol.DecodeNativeUDPPacket(buf[:n])
+		if err != nil {
+			log.Printf("[Server] Failed to decode native UDP packet: %v", err)
+			continue
+		}
+
+		// 查找对应的UDP监听器
+		s.mu.RLock()
+		udpListener, exists := s.udpListeners[pkt.ServerPort]
+		s.mu.RUnlock()
+
+		if !exists {
+			log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
+			continue
+		}
+
+		// 更新客户端的UDP地址（用于发送响应）
+		s.mu.Lock()
+		s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
+		s.mu.Unlock()
+
+		// 查找原始请求的远程地址
+		udpListener.mu.RLock()
+		remoteAddr, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
+		udpListener.mu.RUnlock()
+
+		if !exists {
+			log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
+			continue
+		}
+
+		// 发送响应给外部客户端
+		_, err = udpListener.Conn.WriteToUDP(pkt.Data, remoteAddr)
+		if err != nil {
+			log.Printf("[Server] Failed to send UDP response to external client: %v", err)
+		}
+	}
 }
 
 // startTunnelListener 启动隧道监听器
@@ -162,8 +246,10 @@ func (s *Server) startUDPTunnelListener(tunnel protocol.Tunnel, clientName strin
 	}
 
 	s.udpListeners[tunnel.ServerPort] = udpListener
-	log.Printf("[Server] UDP Tunnel %s listening on port %d -> client %s port %d",
-		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
+
+	udpMode := protocol.GetUDPMode(tunnel.UDPMode)
+	log.Printf("[Server] UDP Tunnel %s listening on port %d -> client %s port %d (mode: %s)",
+		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort, udpMode)
 
 	go s.handleUDPTunnel(udpListener)
 	return nil
@@ -172,6 +258,7 @@ func (s *Server) startUDPTunnelListener(tunnel protocol.Tunnel, clientName strin
 // handleUDPTunnel 处理UDP隧道数据
 func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 	buf := make([]byte, 65535) // UDP最大包大小
+	udpMode := protocol.GetUDPMode(udpListener.Tunnel.UDPMode)
 
 	for s.running {
 		n, remoteAddr, err := udpListener.Conn.ReadFromUDP(buf)
@@ -191,6 +278,7 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 		// 查找客户端
 		s.mu.RLock()
 		client, exists := s.clientsByName[udpListener.ClientName]
+		clientUDPAddr := s.clientUDPAddrs[udpListener.ClientName]
 		s.mu.RUnlock()
 
 		if !exists {
@@ -198,24 +286,39 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 			continue
 		}
 
-		// 通过TCP控制通道发送UDP数据
-		msg, err := protocol.NewUDPDataMessage(
-			udpListener.Tunnel.Name,
-			udpListener.Tunnel.ClientPort,
-			remoteAddrStr,
-			buf[:n],
-		)
-		if err != nil {
-			log.Printf("[Server] Failed to create UDP data message: %v", err)
-			continue
-		}
+		// 根据udp_mode选择传输方式
+		if udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil {
+			// 原生UDP传输：直接通过UDP发送给客户端
+			pktData := protocol.EncodeNativeUDPPacket(
+				udpListener.Tunnel.ServerPort,
+				udpListener.Tunnel.ClientPort,
+				remoteAddrStr,
+				buf[:n],
+			)
+			_, err = s.nativeUDPConn.WriteToUDP(pktData, clientUDPAddr)
+			if err != nil {
+				log.Printf("[Server] Failed to send native UDP data to client: %v", err)
+			}
+		} else {
+			// TCP封装传输（备用方法）：通过TCP控制通道发送UDP数据
+			msg, err := protocol.NewUDPDataMessage(
+				udpListener.Tunnel.Name,
+				udpListener.Tunnel.ClientPort,
+				remoteAddrStr,
+				buf[:n],
+			)
+			if err != nil {
+				log.Printf("[Server] Failed to create UDP data message: %v", err)
+				continue
+			}
 
-		client.mu.Lock()
-		err = protocol.SendMessage(client.Conn, msg)
-		client.mu.Unlock()
+			client.mu.Lock()
+			err = protocol.SendMessage(client.Conn, msg)
+			client.mu.Unlock()
 
-		if err != nil {
-			log.Printf("[Server] Failed to send UDP data to client: %v", err)
+			if err != nil {
+				log.Printf("[Server] Failed to send UDP data to client: %v", err)
+			}
 		}
 	}
 }
@@ -704,6 +807,15 @@ func (s *Server) Stop() {
 	if s.controlListener != nil {
 		s.controlListener.Close()
 	}
+
+	// 关闭原生UDP传输监听器
+	if s.nativeUDPConn != nil {
+		s.nativeUDPConn.Close()
+		s.nativeUDPConn = nil
+	}
+
+	// 清空客户端UDP地址映射
+	s.clientUDPAddrs = make(map[string]*net.UDPAddr)
 
 	// 关闭所有隧道监听器
 	for _, listener := range s.tunnelListeners {

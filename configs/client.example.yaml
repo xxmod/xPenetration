@@ -3,8 +3,10 @@
 client:
   # 服务端地址（IP或域名）
   server_addr: "your-server.example.com"
-  # 服务端控制端口
+  # 服务端控制端口（TCP）
   server_port: 7000
+  # 服务端UDP传输端口（用于原生UDP隧道，需与服务端配置一致）
+  server_udp_port: 7001
   # 密钥（需与服务端配置匹配）
   secret_key: "your-secret-key-change-me"
   # 客户端名称（需与服务端配置的客户端名称匹配）

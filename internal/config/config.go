@@ -3,21 +3,23 @@ package config
 import (
 	"os"
 
-	"gopkg.in/yaml.v3"
 	"xpenetration/internal/protocol"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ServerConfig 服务端配置
 type ServerConfig struct {
-	Server  ServerSettings    `yaml:"server" json:"server"`
-	Clients []ClientSettings  `yaml:"clients" json:"clients"`
-	Log     LogSettings       `yaml:"log" json:"log"`
+	Server  ServerSettings   `yaml:"server" json:"server"`
+	Clients []ClientSettings `yaml:"clients" json:"clients"`
+	Log     LogSettings      `yaml:"log" json:"log"`
 }
 
 // ServerSettings 服务端设置
 type ServerSettings struct {
 	ListenAddr  string `yaml:"listen_addr" json:"listen_addr"`   // 监听地址
 	ControlPort int    `yaml:"control_port" json:"control_port"` // 控制端口
+	UDPPort     int    `yaml:"udp_port" json:"udp_port"`         // UDP数据传输端口（用于原生UDP隧道）
 	WebPort     int    `yaml:"web_port" json:"web_port"`         // Web管理端口
 	SecretKey   string `yaml:"secret_key" json:"secret_key"`     // 全局密钥
 }
@@ -45,6 +47,7 @@ type ClientConnConfig struct {
 type ClientConnSettings struct {
 	ServerAddr        string `yaml:"server_addr" json:"server_addr"`               // 服务端地址
 	ServerPort        int    `yaml:"server_port" json:"server_port"`               // 服务端控制端口
+	ServerUDPPort     int    `yaml:"server_udp_port" json:"server_udp_port"`       // 服务端UDP传输端口（用于原生UDP隧道）
 	SecretKey         string `yaml:"secret_key" json:"secret_key"`                 // 密钥
 	ClientName        string `yaml:"client_name" json:"client_name"`               // 客户端名称
 	AutoReconnect     bool   `yaml:"auto_reconnect" json:"auto_reconnect"`         // 自动重连
@@ -69,6 +72,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 	if config.Server.ControlPort == 0 {
 		config.Server.ControlPort = 7000
+	}
+	if config.Server.UDPPort == 0 {
+		config.Server.UDPPort = 7001
 	}
 	if config.Server.WebPort == 0 {
 		config.Server.WebPort = 7500
@@ -98,6 +104,9 @@ func LoadClientConfig(path string) (*ClientConnConfig, error) {
 	// 设置默认值
 	if config.Client.ServerPort == 0 {
 		config.Client.ServerPort = 7000
+	}
+	if config.Client.ServerUDPPort == 0 {
+		config.Client.ServerUDPPort = 7001
 	}
 	if config.Client.ReconnectInterval == 0 {
 		config.Client.ReconnectInterval = 5

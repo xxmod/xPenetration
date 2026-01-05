@@ -8,6 +8,7 @@
 
 - 密钥验证（支持全局密钥与客户端独立密钥）
 - TCP/UDP 隧道（在服务端映射端口，对外提供访问）
+- 支持使用TCP封装UDP传输UDP数据包（仅作为备用选项，会导致高丢包率）
 - Web 管理界面（查看/调整服务端配置）
 - 客户端自动重连
 
@@ -33,22 +34,27 @@ Windows：运行 `build.bat`，产物在 `bin/`。
 
 > 于有公网IP的服务器启动
 
+实例配置文件是[server.example.yaml](https://github.com/xxmod/xPenetration/blob/main/configs/server.example.yaml)，复制到本地后修改为 `client.yaml` 放于根目录下
+
 ```bash
 # 使用示例配置启动
-bin/xpen-server -c configs/server.yaml
+bin/xpen-server -c server.yaml
 ```
 
 Web 管理界面默认地址：`http://0.0.0.0:7500`（以配置为准）。
 
-说明：如果未找到配置文件，服务端会以默认端口启动 Web 界面用于配置。
+说明：如果未找到配置文件，服务端会以默认端口启动 Web 界面用于配置，此时会根据web生成配置文件。
+
 
 ### 3) 启动客户端
 
 > 于无公网ip的客户端启动
 
+配置文件在[client.example.yaml](https://github.com/xxmod/xPenetration/blob/main/configs/client.example.yaml)找到，复制到本地后修改为 `client.yaml` 放于根目录下会自动识别
+
 ```bash
 # 使用示例配置启动
-bin/xpen-client -c configs/client.yaml
+bin/xpen-client -c client.yaml
 ```
 
 也可以只用命令行参数：
@@ -56,6 +62,7 @@ bin/xpen-client -c configs/client.yaml
 ```bash
 bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 ```
+
 
 ## 配置要点
 
