@@ -1,25 +1,35 @@
 package server
 
 import (
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
-	"fmt"
+	"sync"
+
+	"xpenetration/internal/config"
 )
+
+//go:embed web/*
+var webFS embed.FS
 
 // WebServer Web管理服务
 type WebServer struct {
-	server   *Server
-	addr     string
-	mux      *http.ServeMux
+	server     *Server
+	addr       string
+	mux        *http.ServeMux
+	configPath string
+	mu         sync.Mutex
 }
 
 // NewWebServer 创建Web服务器
-func NewWebServer(server *Server, addr string) *WebServer {
+func NewWebServer(server *Server, addr string, configPath string) *WebServer {
 	ws := &WebServer{
-		server: server,
-		addr:   addr,
-		mux:    http.NewServeMux(),
+		server:     server,
+		addr:       addr,
+		mux:        http.NewServeMux(),
+		configPath: configPath,
 	}
 	ws.setupRoutes()
 	return ws
@@ -32,9 +42,17 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/clients", ws.handleClients)
 	ws.mux.HandleFunc("/api/connections", ws.handleConnections)
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
+	ws.mux.HandleFunc("/api/config", ws.handleConfig)
 
 	// 静态文件（前端）
-	ws.mux.HandleFunc("/", ws.handleIndex)
+	// 从 embed.FS 中获取 web 子目录
+	subFS, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatalf("Failed to create sub FS: %v", err)
+	}
+	
+	fileServer := http.FileServer(http.FS(subFS))
+	ws.mux.Handle("/", fileServer)
 }
 
 // Start 启动Web服务器
@@ -97,38 +115,47 @@ func (ws *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ws.writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// handleIndex 处理首页请求
-func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// 返回简单的占位页面，等待前端开发
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-    <title>xPenetration - 内网穿透管理</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        .api-list { background: #f8f9fa; padding: 20px; border-radius: 4px; margin-top: 20px; }
-        .api-item { margin: 10px 0; }
-        code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔗 xPenetration</h1>
-        <p>内网穿透管理系统 - 后端API已就绪，前端界面开发中...</p>
-        
-        <div class="api-list">
-            <h3>可用API接口：</h3>
-            <div class="api-item">📊 <code>GET /api/stats</code> - 获取统计信息</div>
-            <div class="api-item">👥 <code>GET /api/clients</code> - 获取客户端列表</div>
-            <div class="api-item">🔌 <code>GET /api/connections</code> - 获取活跃连接列表</div>
-            <div class="api-item">❤️ <code>GET /api/health</code> - 健康检查</div>
-        </div>
-    </div>
-</body>
-</html>`)
+// handleConfig 处理配置请求
+func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if r.Method == "GET" {
+		// 获取当前配置
+		cfg := ws.server.GetConfig()
+		ws.writeJSON(w, cfg)
+		return
+	}
+
+	if r.Method == "POST" {
+		// 保存新配置
+		var newConfig config.ServerConfig
+		if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+			http.Error(w, "Invalid config format", http.StatusBadRequest)
+			return
+		}
+
+		// 保存到文件
+		if err := config.SaveServerConfig(ws.configPath, &newConfig); err != nil {
+			log.Printf("[WebServer] Failed to save config: %v", err)
+			http.Error(w, "Failed to save config", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[WebServer] Config saved to %s", ws.configPath)
+
+		// 重载服务
+		go func() {
+			if err := ws.server.Reload(&newConfig); err != nil {
+				log.Printf("[WebServer] Failed to reload server: %v", err)
+			}
+		}()
+
+		ws.writeJSON(w, map[string]string{"status": "ok", "message": "Config saved and server reloading"})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // writeJSON 写入JSON响应

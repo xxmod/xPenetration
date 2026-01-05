@@ -20,8 +20,8 @@ var (
 )
 
 func init() {
-	flag.StringVar(&configPath, "c", "configs/server.yaml", "配置文件路径")
-	flag.StringVar(&configPath, "config", "configs/server.yaml", "配置文件路径")
+	flag.StringVar(&configPath, "c", "server.yaml", "配置文件路径")
+	flag.StringVar(&configPath, "config", "server.yaml", "配置文件路径")
 	flag.BoolVar(&showHelp, "h", false, "显示帮助信息")
 	flag.BoolVar(&showHelp, "help", false, "显示帮助信息")
 	flag.BoolVar(&showVer, "v", false, "显示版本信息")
@@ -41,15 +41,33 @@ func main() {
 		return
 	}
 
-	// 加载配置
-	cfg, err := config.LoadServerConfig(configPath)
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-
 	log.Printf("===========================================")
 	log.Printf("  xPenetration Server v%s", version)
 	log.Printf("===========================================")
+
+	// 尝试加载配置
+	cfg, err := config.LoadServerConfig(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("Config file not found at %s, using default settings.", configPath)
+			log.Printf("Please configure the server via Web UI.")
+			// 默认配置
+			cfg = &config.ServerConfig{
+				Server: config.ServerSettings{
+					ListenAddr:  "0.0.0.0",
+					ControlPort: 7000,
+					WebPort:     7500,
+				},
+				Log: config.LogSettings{
+					Level:  "info",
+					Output: "stdout",
+				},
+			}
+		} else {
+			log.Fatalf("Failed to load config: %v", err)
+		}
+	}
+
 	log.Printf("Control Port: %d", cfg.Server.ControlPort)
 	log.Printf("Web Port: %d", cfg.Server.WebPort)
 	log.Printf("Clients configured: %d", len(cfg.Clients))
@@ -60,19 +78,21 @@ func main() {
 
 	// 启动服务端
 	if err := srv.Start(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		log.Printf("Warning: Failed to start server core: %v", err)
+		log.Printf("Web UI will still be available for configuration.")
 	}
 
 	// 启动Web服务
 	webAddr := fmt.Sprintf("%s:%d", cfg.Server.ListenAddr, cfg.Server.WebPort)
-	webSrv := server.NewWebServer(srv, webAddr)
+	webSrv := server.NewWebServer(srv, webAddr, configPath)
 	go func() {
 		if err := webSrv.Start(); err != nil {
-			log.Printf("Web server error: %v", err)
+			log.Fatalf("Web server error: %v", err)
 		}
 	}()
 
 	log.Printf("Server started successfully!")
+	log.Printf("Web UI available at http://%s:%d", cfg.Server.ListenAddr, cfg.Server.WebPort)
 
 	// 等待退出信号
 	sigChan := make(chan os.Signal, 1)
@@ -92,11 +112,15 @@ func printHelp() {
   xpen-server [选项]
 
 选项:
-  -c, --config <path>   指定配置文件路径 (默认: configs/server.yaml)
+  -c, --config <path>   指定配置文件路径 (默认: server.yaml)
   -h, --help            显示帮助信息
   -v, --version         显示版本信息
 
 示例:
+  # 默认启动（自动查找当前目录下的 server.yaml）
+  xpen-server
+
+  # 指定配置文件
   xpen-server -c /etc/xpen/server.yaml
 
 配置文件说明:

@@ -19,6 +19,7 @@ type Server struct {
 	clientsByName   map[string]*ClientConn // clientName -> client connection
 	tunnelListeners map[int]net.Listener   // serverPort -> listener
 	connections     map[string]*ProxyConn  // connID -> proxy connection
+	controlListener net.Listener           // 控制端口监听器
 	mu              sync.RWMutex
 	running         bool
 }
@@ -67,6 +68,10 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on control port: %v", err)
 	}
+
+	s.mu.Lock()
+	s.controlListener = listener
+	s.mu.Unlock()
 
 	log.Printf("[Server] Control server listening on %s", controlAddr)
 
@@ -487,6 +492,29 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 	}
 }
 
+// GetConfig 获取当前配置
+func (s *Server) GetConfig() *config.ServerConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config
+}
+
+// Reload 重载配置
+func (s *Server) Reload(newConfig *config.ServerConfig) error {
+	log.Printf("[Server] Reloading configuration...")
+	
+	// 停止当前服务
+	s.Stop()
+	
+	// 更新配置
+	s.mu.Lock()
+	s.config = newConfig
+	s.mu.Unlock()
+	
+	// 重新启动服务
+	return s.Start()
+}
+
 // Stop 停止服务端
 func (s *Server) Stop() {
 	s.running = false
@@ -494,20 +522,34 @@ func (s *Server) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 关闭控制端口监听器
+	// 注意：这里需要保存控制端口的listener才能关闭它
+	// 由于之前的实现没有保存，这里需要修改Start方法来保存它
+	if s.controlListener != nil {
+		s.controlListener.Close()
+	}
+
 	// 关闭所有隧道监听器
 	for _, listener := range s.tunnelListeners {
 		listener.Close()
 	}
+	// 清空监听器map
+	s.tunnelListeners = make(map[int]net.Listener)
 
 	// 关闭所有客户端连接
 	for _, client := range s.clients {
 		client.Conn.Close()
 	}
+	// 清空客户端map
+	s.clients = make(map[string]*ClientConn)
+	s.clientsByName = make(map[string]*ClientConn)
 
 	// 关闭所有代理连接
 	for _, conn := range s.connections {
 		conn.ExternalConn.Close()
 	}
+	// 清空连接map
+	s.connections = make(map[string]*ProxyConn)
 }
 
 // GetClients 获取所有客户端信息（用于Web API）

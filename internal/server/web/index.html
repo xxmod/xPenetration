@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>xPenetration 管理面板</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        [v-cloak] { display: none; }
+        .sidebar { min-height: 100vh; background-color: #343a40; color: white; }
+        .nav-link { color: rgba(255,255,255,.75); cursor: pointer; }
+        .nav-link:hover, .nav-link.active { color: white; background-color: rgba(255,255,255,.1); }
+        .card { margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,.05); }
+        .status-indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-online { background-color: #28a745; }
+        .status-offline { background-color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div id="app" v-cloak class="d-flex">
+        <!-- Sidebar -->
+        <div class="d-flex flex-column flex-shrink-0 p-3 sidebar" style="width: 280px;">
+            <a href="/" class="d-flex align-items-center mb-3 mb-md-0 me-md-auto text-white text-decoration-none">
+                <i class="bi bi-hdd-network fs-4 me-2"></i>
+                <span class="fs-4">xPenetration</span>
+            </a>
+            <hr>
+            <ul class="nav nav-pills flex-column mb-auto">
+                <li class="nav-item">
+                    <a class="nav-link" :class="{ active: currentView === 'dashboard' }" @click="currentView = 'dashboard'">
+                        <i class="bi bi-speedometer2 me-2"></i> 仪表盘
+                    </a>
+                </li>
+                <li>
+                    <a class="nav-link" :class="{ active: currentView === 'clients' }" @click="currentView = 'clients'">
+                        <i class="bi bi-people me-2"></i> 客户端管理
+                    </a>
+                </li>
+                <li>
+                    <a class="nav-link" :class="{ active: currentView === 'settings' }" @click="currentView = 'settings'">
+                        <i class="bi bi-gear me-2"></i> 服务端设置
+                    </a>
+                </li>
+            </ul>
+            <hr>
+            <div class="dropdown">
+                <a href="#" class="d-flex align-items-center text-white text-decoration-none">
+                    <i class="bi bi-circle-fill text-success me-2" v-if="serverStatus"></i>
+                    <i class="bi bi-circle-fill text-danger me-2" v-else></i>
+                    <strong>{{ serverStatus ? '运行中' : '已停止' }}</strong>
+                </a>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="flex-grow-1 p-4 bg-light" style="height: 100vh; overflow-y: auto;">
+            
+            <!-- Dashboard -->
+            <div v-if="currentView === 'dashboard'">
+                <h2 class="mb-4">系统概览</h2>
+                <div class="row">
+                    <div class="col-md-4">
+                        <div class="card text-white bg-primary">
+                            <div class="card-body">
+                                <h5 class="card-title">在线客户端</h5>
+                                <p class="card-text display-4">{{ stats.client_count || 0 }}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-white bg-success">
+                            <div class="card-body">
+                                <h5 class="card-title">活跃连接</h5>
+                                <p class="card-text display-4">{{ stats.connection_count || 0 }}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card text-white bg-info">
+                            <div class="card-body">
+                                <h5 class="card-title">监听端口</h5>
+                                <p class="card-text display-4">{{ stats.tunnel_count || 0 }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <h4 class="mt-4 mb-3">活跃连接列表</h4>
+                <div class="card">
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>客户端</th>
+                                        <th>隧道</th>
+                                        <th>来源IP</th>
+                                        <th>建立时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="conn in connections" :key="conn.id">
+                                        <td>{{ conn.id }}</td>
+                                        <td>{{ conn.client_id }}</td>
+                                        <td>{{ conn.tunnel_name }} ({{ conn.server_port }} -> {{ conn.client_port }})</td>
+                                        <td>{{ conn.remote_addr }}</td>
+                                        <td>{{ formatDate(conn.created_at) }}</td>
+                                    </tr>
+                                    <tr v-if="connections.length === 0">
+                                        <td colspan="5" class="text-center text-muted">暂无活跃连接</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Clients Management -->
+            <div v-if="currentView === 'clients'">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h2>客户端配置</h2>
+                    <button class="btn btn-primary" @click="addClient">
+                        <i class="bi bi-plus-lg"></i> 添加客户端
+                    </button>
+                </div>
+
+                <div v-for="(client, index) in config.clients" :key="index" class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="bi bi-pc-display me-2"></i>
+                            {{ client.name }}
+                        </h5>
+                        <div>
+                            <span class="badge bg-secondary me-2" v-if="!client.secret_key">使用全局密钥</span>
+                            <span class="badge bg-warning text-dark me-2" v-else>专属密钥</span>
+                            <button class="btn btn-sm btn-outline-danger" @click="removeClient(index)">删除</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label">客户端名称</label>
+                                <input type="text" class="form-control" v-model="client.name">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">专属密钥 (可选)</label>
+                                <input type="text" class="form-control" v-model="client.secret_key" placeholder="留空则使用全局密钥">
+                            </div>
+                        </div>
+
+                        <h6 class="border-bottom pb-2 mb-3">隧道列表</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-bordered">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>隧道名称</th>
+                                        <th>协议</th>
+                                        <th>服务端端口 (公网)</th>
+                                        <th>客户端端口 (内网)</th>
+                                        <th style="width: 50px;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(tunnel, tIndex) in client.tunnels" :key="tIndex">
+                                        <td><input type="text" class="form-control form-control-sm" v-model="tunnel.name"></td>
+                                        <td>
+                                            <select class="form-select form-select-sm" v-model="tunnel.protocol">
+                                                <option value="tcp">TCP</option>
+                                                <option value="udp">UDP</option>
+                                            </select>
+                                        </td>
+                                        <td><input type="number" class="form-control form-control-sm" v-model.number="tunnel.server_port"></td>
+                                        <td><input type="number" class="form-control form-control-sm" v-model.number="tunnel.client_port"></td>
+                                        <td class="text-center">
+                                            <button class="btn btn-sm btn-link text-danger p-0" @click="removeTunnel(index, tIndex)">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <button class="btn btn-sm btn-outline-secondary" @click="addTunnel(index)">
+                                <i class="bi bi-plus"></i> 添加隧道
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                    <button class="btn btn-success btn-lg" @click="saveConfig" :disabled="saving">
+                        <span v-if="saving" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                        {{ saving ? '保存中...' : '保存配置并重启服务' }}
+                    </button>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div v-if="currentView === 'settings'">
+                <h2 class="mb-4">服务端设置</h2>
+                <div class="card">
+                    <div class="card-body">
+                        <form @submit.prevent="saveConfig">
+                            <div class="mb-3">
+                                <label class="form-label">监听地址</label>
+                                <input type="text" class="form-control" v-model="config.server.listen_addr">
+                                <div class="form-text">通常为 0.0.0.0</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">控制端口</label>
+                                <input type="number" class="form-control" v-model.number="config.server.control_port">
+                                <div class="form-text">客户端连接此端口进行通信</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Web管理端口</label>
+                                <input type="number" class="form-control" v-model.number="config.server.web_port">
+                                <div class="form-text">当前管理页面的访问端口 (修改后需重启程序生效)</div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">全局密钥</label>
+                                <input type="text" class="form-control" v-model="config.server.secret_key">
+                                <div class="form-text">所有未配置专属密钥的客户端将使用此密钥验证</div>
+                            </div>
+                            
+                            <hr>
+                            
+                            <div class="mb-3">
+                                <label class="form-label">日志级别</label>
+                                <select class="form-select" v-model="config.log.level">
+                                    <option value="debug">Debug</option>
+                                    <option value="info">Info</option>
+                                    <option value="warn">Warn</option>
+                                    <option value="error">Error</option>
+                                </select>
+                            </div>
+
+                            <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                                <button type="submit" class="btn btn-primary btn-lg" :disabled="saving">
+                                    <span v-if="saving" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                    {{ saving ? '保存中...' : '保存配置并重启服务' }}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.2.47/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+        const { createApp } = Vue
+
+        createApp({
+            data() {
+                return {
+                    currentView: 'dashboard',
+                    stats: {},
+                    connections: [],
+                    config: {
+                        server: { listen_addr: '0.0.0.0', control_port: 7000, web_port: 7500, secret_key: '' },
+                        clients: [],
+                        log: { level: 'info', output: 'stdout' }
+                    },
+                    serverStatus: true,
+                    saving: false,
+                    timer: null
+                }
+            },
+            mounted() {
+                this.fetchData();
+                this.fetchConfig();
+                this.timer = setInterval(this.fetchData, 3000);
+            },
+            beforeUnmount() {
+                if (this.timer) clearInterval(this.timer);
+            },
+            methods: {
+                async fetchData() {
+                    try {
+                        const [statsRes, connRes] = await Promise.all([
+                            axios.get('/api/stats'),
+                            axios.get('/api/connections')
+                        ]);
+                        this.stats = statsRes.data;
+                        this.connections = connRes.data;
+                        this.serverStatus = true;
+                    } catch (e) {
+                        console.error('Failed to fetch data', e);
+                        this.serverStatus = false;
+                    }
+                },
+                async fetchConfig() {
+                    try {
+                        const res = await axios.get('/api/config');
+                        this.config = res.data;
+                        if (!this.config.clients) this.config.clients = [];
+                    } catch (e) {
+                        console.error('Failed to fetch config', e);
+                        alert('无法加载配置');
+                    }
+                },
+                async saveConfig() {
+                    this.saving = true;
+                    try {
+                        await axios.post('/api/config', this.config);
+                        alert('配置已保存，服务正在重启...');
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 2000);
+                    } catch (e) {
+                        console.error('Failed to save config', e);
+                        alert('保存配置失败: ' + e.message);
+                    } finally {
+                        this.saving = false;
+                    }
+                },
+                addClient() {
+                    this.config.clients.push({
+                        name: 'new-client',
+                        secret_key: '',
+                        tunnels: []
+                    });
+                },
+                removeClient(index) {
+                    if (confirm('确定要删除这个客户端配置吗？')) {
+                        this.config.clients.splice(index, 1);
+                    }
+                },
+                addTunnel(clientIndex) {
+                    if (!this.config.clients[clientIndex].tunnels) {
+                        this.config.clients[clientIndex].tunnels = [];
+                    }
+                    this.config.clients[clientIndex].tunnels.push({
+                        name: 'new-tunnel',
+                        protocol: 'tcp',
+                        server_port: 0,
+                        client_port: 0
+                    });
+                },
+                removeTunnel(clientIndex, tunnelIndex) {
+                    this.config.clients[clientIndex].tunnels.splice(tunnelIndex, 1);
+                },
+                formatDate(dateStr) {
+                    return new Date(dateStr).toLocaleString();
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
