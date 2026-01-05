@@ -13,15 +13,26 @@ import (
 
 // Client 客户端结构
 type Client struct {
-	config      *config.ClientConnConfig
-	conn        net.Conn
-	clientID    string
-	tunnels     []protocol.Tunnel
-	localConns  map[string]net.Conn // connID -> local connection
-	mu          sync.RWMutex
-	running     bool
-	connected   bool
-	stopChan    chan struct{}
+	config     *config.ClientConnConfig
+	conn       net.Conn
+	clientID   string
+	tunnels    []protocol.Tunnel
+	localConns map[string]net.Conn  // connID -> local connection (TCP)
+	udpConns   map[int]*UDPConnInfo // clientPort -> UDP connection info
+	mu         sync.RWMutex
+	udpMu      sync.RWMutex // UDP专用锁，减少锁竞争
+	running    bool
+	connected  bool
+	stopChan   chan struct{}
+}
+
+// UDPConnInfo UDP连接信息
+type UDPConnInfo struct {
+	Conn           *net.UDPConn
+	TunnelName     string
+	ClientPort     int
+	lastRemoteAddr string // 最后一个请求的远程地址
+	mu             sync.RWMutex
 }
 
 // NewClient 创建新的客户端
@@ -29,6 +40,7 @@ func NewClient(cfg *config.ClientConnConfig) *Client {
 	return &Client{
 		config:     cfg,
 		localConns: make(map[string]net.Conn),
+		udpConns:   make(map[int]*UDPConnInfo),
 		stopChan:   make(chan struct{}),
 	}
 }
@@ -208,6 +220,8 @@ func (c *Client) handleMessages() {
 			// 心跳确认，忽略
 		case protocol.MsgTypeError:
 			c.handleError(msg)
+		case protocol.MsgTypeUDPData:
+			go c.handleUDPData(msg)
 		default:
 			log.Printf("[Client] Unknown message type: %d", msg.Type)
 		}
@@ -358,16 +372,126 @@ func (c *Client) handleError(msg *protocol.Message) {
 	log.Printf("[Client] Server error: [%d] %s", em.Code, em.Message)
 }
 
+// handleUDPData 处理服务端发来的UDP数据
+func (c *Client) handleUDPData(msg *protocol.Message) {
+	udm, err := protocol.ParseUDPDataMessage(msg.Payload)
+	if err != nil {
+		log.Printf("[Client] Failed to parse UDP data message: %v", err)
+		return
+	}
+
+	// 获取或创建本地UDP连接
+	c.udpMu.RLock()
+	connInfo, exists := c.udpConns[udm.ClientPort]
+	c.udpMu.RUnlock()
+
+	if !exists {
+		c.udpMu.Lock()
+		// 双重检查
+		connInfo, exists = c.udpConns[udm.ClientPort]
+		if !exists {
+			// 创建新的UDP连接到本地服务
+			localAddr := fmt.Sprintf("127.0.0.1:%d", udm.ClientPort)
+			udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
+			if err != nil {
+				c.udpMu.Unlock()
+				log.Printf("[Client] Failed to resolve UDP address %s: %v", localAddr, err)
+				return
+			}
+
+			localConn, err := net.DialUDP("udp", nil, udpAddr)
+			if err != nil {
+				c.udpMu.Unlock()
+				log.Printf("[Client] Failed to connect to local UDP service %s: %v", localAddr, err)
+				return
+			}
+
+			connInfo = &UDPConnInfo{
+				Conn:       localConn,
+				TunnelName: udm.TunnelName,
+				ClientPort: udm.ClientPort,
+			}
+			c.udpConns[udm.ClientPort] = connInfo
+			log.Printf("[Client] Created UDP connection to local port %d", udm.ClientPort)
+
+			// 启动UDP响应监听
+			go c.forwardUDPFromLocal(connInfo)
+		}
+		c.udpMu.Unlock()
+	}
+
+	// 发送数据到本地UDP服务（带上远程地址信息，用于响应时携带）
+	// 在发送前先保存当前的remoteAddr到连接状态
+	connInfo.mu.Lock()
+	connInfo.lastRemoteAddr = udm.RemoteAddr
+	connInfo.mu.Unlock()
+
+	_, err = connInfo.Conn.Write(udm.Data)
+	if err != nil {
+		log.Printf("[Client] Failed to write UDP data to local service: %v", err)
+	}
+}
+
+// forwardUDPFromLocal 从本地UDP连接转发响应数据到服务端
+func (c *Client) forwardUDPFromLocal(connInfo *UDPConnInfo) {
+	buf := make([]byte, 65535)
+
+	for c.running && c.connected {
+		connInfo.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		n, err := connInfo.Conn.Read(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			log.Printf("[Client] UDP read from local error: %v", err)
+			return
+		}
+
+		// 获取最后的远程地址
+		connInfo.mu.RLock()
+		remoteAddr := connInfo.lastRemoteAddr
+		connInfo.mu.RUnlock()
+
+		if remoteAddr == "" {
+			continue
+		}
+
+		// 发送响应数据给服务端
+		msg, err := protocol.NewUDPDataMessage(connInfo.TunnelName, connInfo.ClientPort, remoteAddr, buf[:n])
+		if err != nil {
+			log.Printf("[Client] Failed to create UDP response message: %v", err)
+			continue
+		}
+
+		c.mu.Lock()
+		err = protocol.SendMessage(c.conn, msg)
+		c.mu.Unlock()
+
+		if err != nil {
+			log.Printf("[Client] Failed to send UDP response to server: %v", err)
+			return
+		}
+	}
+}
+
 // cleanup 清理资源
 func (c *Client) cleanup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 关闭所有本地连接
+	// 关闭所有本地TCP连接
 	for _, conn := range c.localConns {
 		conn.Close()
 	}
 	c.localConns = make(map[string]net.Conn)
+
+	// 关闭所有本地UDP连接
+	c.udpMu.Lock()
+	for _, connInfo := range c.udpConns {
+		connInfo.Conn.Close()
+	}
+	c.udpConns = make(map[int]*UDPConnInfo)
+	c.udpMu.Unlock()
 
 	// 关闭服务端连接
 	if c.conn != nil {

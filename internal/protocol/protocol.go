@@ -20,6 +20,7 @@ const (
 	MsgTypeDisconnect    uint8 = 8  // 断开连接
 	MsgTypeError         uint8 = 9  // 错误消息
 	MsgTypeConnReady     uint8 = 10 // 连接就绪
+	MsgTypeUDPData       uint8 = 11 // UDP数据传输
 )
 
 // Message 通用消息结构
@@ -91,6 +92,77 @@ type ErrorMessage struct {
 // Heartbeat 心跳消息
 type Heartbeat struct {
 	Timestamp int64 `json:"timestamp"`
+}
+
+// UDPDataMessage UDP数据消息（通过TCP隧道传输）
+type UDPDataMessage struct {
+	TunnelName string `json:"tunnel_name"` // 隧道名称
+	ClientPort int    `json:"client_port"` // 客户端本地端口
+	RemoteAddr string `json:"remote_addr"` // 远程地址（用于响应）
+	Data       []byte `json:"data"`        // UDP数据
+}
+
+// EncodeUDPDataMessage 二进制编码UDP数据消息（高性能）
+// 格式: [1字节隧道名长度][隧道名][2字节端口][1字节地址长度][地址][数据]
+func EncodeUDPDataMessage(tunnelName string, clientPort int, remoteAddr string, data []byte) []byte {
+	tunnelNameBytes := []byte(tunnelName)
+	remoteAddrBytes := []byte(remoteAddr)
+
+	totalLen := 1 + len(tunnelNameBytes) + 2 + 1 + len(remoteAddrBytes) + len(data)
+	buf := make([]byte, totalLen)
+
+	offset := 0
+	buf[offset] = byte(len(tunnelNameBytes))
+	offset++
+	copy(buf[offset:], tunnelNameBytes)
+	offset += len(tunnelNameBytes)
+	binary.BigEndian.PutUint16(buf[offset:], uint16(clientPort))
+	offset += 2
+	buf[offset] = byte(len(remoteAddrBytes))
+	offset++
+	copy(buf[offset:], remoteAddrBytes)
+	offset += len(remoteAddrBytes)
+	copy(buf[offset:], data)
+
+	return buf
+}
+
+// DecodeUDPDataMessageBinary 二进制解码UDP数据消息（高性能）
+func DecodeUDPDataMessageBinary(payload []byte) (*UDPDataMessage, error) {
+	if len(payload) < 4 {
+		return nil, fmt.Errorf("payload too short")
+	}
+
+	offset := 0
+	tunnelNameLen := int(payload[offset])
+	offset++
+
+	if len(payload) < offset+tunnelNameLen+3 {
+		return nil, fmt.Errorf("payload too short for tunnel name")
+	}
+	tunnelName := string(payload[offset : offset+tunnelNameLen])
+	offset += tunnelNameLen
+
+	clientPort := int(binary.BigEndian.Uint16(payload[offset:]))
+	offset += 2
+
+	remoteAddrLen := int(payload[offset])
+	offset++
+
+	if len(payload) < offset+remoteAddrLen {
+		return nil, fmt.Errorf("payload too short for remote addr")
+	}
+	remoteAddr := string(payload[offset : offset+remoteAddrLen])
+	offset += remoteAddrLen
+
+	data := payload[offset:]
+
+	return &UDPDataMessage{
+		TunnelName: tunnelName,
+		ClientPort: clientPort,
+		RemoteAddr: remoteAddr,
+		Data:       data,
+	}, nil
 }
 
 // EncodeMessage 编码消息
@@ -385,4 +457,18 @@ func ParseErrorMessage(payload []byte) (*ErrorMessage, error) {
 		return nil, err
 	}
 	return &em, nil
+}
+
+// NewUDPDataMessage 创建UDP数据消息（使用二进制编码提高性能）
+func NewUDPDataMessage(tunnelName string, clientPort int, remoteAddr string, data []byte) (*Message, error) {
+	payload := EncodeUDPDataMessage(tunnelName, clientPort, remoteAddr, data)
+	return &Message{
+		Type:    MsgTypeUDPData,
+		Payload: payload,
+	}, nil
+}
+
+// ParseUDPDataMessage 解析UDP数据消息（使用二进制解码提高性能）
+func ParseUDPDataMessage(payload []byte) (*UDPDataMessage, error) {
+	return DecodeUDPDataMessageBinary(payload)
 }

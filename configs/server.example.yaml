@@ -58,6 +58,23 @@ clients:
         server_port: 16379
         protocol: "tcp"
 
+  # 客户端4：UDP服务穿透示例
+  - name: "game-server"
+    secret_key: "game-server-secret-key"
+    tunnels:
+      - name: "game-udp"
+        client_port: 27015    # 游戏服务UDP端口
+        server_port: 27015    # 服务端暴露UDP端口
+        protocol: "udp"       # UDP隧道（通过TCP封包传输）
+      - name: "dns"
+        client_port: 53       # DNS服务
+        server_port: 10053
+        protocol: "udp"
+      - name: "voip"
+        client_port: 5060     # VoIP SIP端口
+        server_port: 15060
+        protocol: "udp"
+
 # 日志配置
 log:
   # 日志级别: debug, info, warn, error

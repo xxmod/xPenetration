@@ -17,34 +17,46 @@ type Server struct {
 	config          *config.ServerConfig
 	clients         map[string]*ClientConn // clientID -> client connection
 	clientsByName   map[string]*ClientConn // clientName -> client connection
-	tunnelListeners map[int]net.Listener   // serverPort -> listener
+	tunnelListeners map[int]net.Listener   // serverPort -> listener (TCP)
+	udpListeners    map[int]*UDPListener   // serverPort -> UDP listener
 	connections     map[string]*ProxyConn  // connID -> proxy connection
 	controlListener net.Listener           // 控制端口监听器
 	mu              sync.RWMutex
 	running         bool
 }
 
+// UDPListener UDP监听器信息
+type UDPListener struct {
+	Conn       *net.UDPConn
+	Tunnel     protocol.Tunnel
+	ClientName string
+	// 保存远程地址到响应通道的映射，用于UDP响应
+	remoteAddrs map[string]*net.UDPAddr
+	mu          sync.RWMutex
+}
+
 // ClientConn 客户端连接信息
 type ClientConn struct {
-	ID         string
-	Name       string
-	Conn       net.Conn
-	Tunnels    []protocol.Tunnel
-	ConnectedAt time.Time
+	ID            string
+	Name          string
+	Conn          net.Conn
+	Tunnels       []protocol.Tunnel
+	ConnectedAt   time.Time
 	LastHeartbeat time.Time
-	mu         sync.Mutex
+	mu            sync.Mutex
 }
 
 // ProxyConn 代理连接信息
 type ProxyConn struct {
-	ID         string
-	ClientID   string
-	TunnelName string
-	ClientPort int
-	ServerPort int
+	ID           string
+	ClientID     string
+	TunnelName   string
+	ClientPort   int
+	ServerPort   int
 	ExternalConn net.Conn
-	RemoteAddr string
-	CreatedAt  time.Time
+	RemoteAddr   string
+	CreatedAt    time.Time
+	Ready        chan bool // 等待客户端连接就绪
 }
 
 // NewServer 创建新的服务端
@@ -54,6 +66,7 @@ func NewServer(cfg *config.ServerConfig) *Server {
 		clients:         make(map[string]*ClientConn),
 		clientsByName:   make(map[string]*ClientConn),
 		tunnelListeners: make(map[int]net.Listener),
+		udpListeners:    make(map[int]*UDPListener),
 		connections:     make(map[string]*ProxyConn),
 	}
 }
@@ -78,8 +91,14 @@ func (s *Server) Start() error {
 	// 启动所有隧道端口监听
 	for _, client := range s.config.Clients {
 		for _, tunnel := range client.Tunnels {
-			if err := s.startTunnelListener(tunnel, client.Name); err != nil {
-				log.Printf("[Server] Failed to start tunnel listener for %s:%d: %v", tunnel.Name, tunnel.ServerPort, err)
+			if tunnel.Protocol == "udp" {
+				if err := s.startUDPTunnelListener(tunnel, client.Name); err != nil {
+					log.Printf("[Server] Failed to start UDP tunnel listener for %s:%d: %v", tunnel.Name, tunnel.ServerPort, err)
+				}
+			} else {
+				if err := s.startTunnelListener(tunnel, client.Name); err != nil {
+					log.Printf("[Server] Failed to start tunnel listener for %s:%d: %v", tunnel.Name, tunnel.ServerPort, err)
+				}
 			}
 		}
 	}
@@ -107,11 +126,139 @@ func (s *Server) startTunnelListener(tunnel protocol.Tunnel, clientName string) 
 	}
 
 	s.tunnelListeners[tunnel.ServerPort] = listener
-	log.Printf("[Server] Tunnel %s listening on port %d -> client %s port %d", 
+	log.Printf("[Server] Tunnel %s listening on port %d -> client %s port %d",
 		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
 
 	go s.acceptTunnelConnections(listener, tunnel, clientName)
 	return nil
+}
+
+// startUDPTunnelListener 启动UDP隧道监听器
+func (s *Server) startUDPTunnelListener(tunnel protocol.Tunnel, clientName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 检查端口是否已被监听
+	if _, exists := s.udpListeners[tunnel.ServerPort]; exists {
+		return nil
+	}
+
+	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddr, tunnel.ServerPort)
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+
+	udpListener := &UDPListener{
+		Conn:        conn,
+		Tunnel:      tunnel,
+		ClientName:  clientName,
+		remoteAddrs: make(map[string]*net.UDPAddr),
+	}
+
+	s.udpListeners[tunnel.ServerPort] = udpListener
+	log.Printf("[Server] UDP Tunnel %s listening on port %d -> client %s port %d",
+		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
+
+	go s.handleUDPTunnel(udpListener)
+	return nil
+}
+
+// handleUDPTunnel 处理UDP隧道数据
+func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
+	buf := make([]byte, 65535) // UDP最大包大小
+
+	for s.running {
+		n, remoteAddr, err := udpListener.Conn.ReadFromUDP(buf)
+		if err != nil {
+			if s.running {
+				log.Printf("[Server] UDP read error: %v", err)
+			}
+			continue
+		}
+
+		// 保存远程地址用于响应
+		remoteAddrStr := remoteAddr.String()
+		udpListener.mu.Lock()
+		udpListener.remoteAddrs[remoteAddrStr] = remoteAddr
+		udpListener.mu.Unlock()
+
+		// 查找客户端
+		s.mu.RLock()
+		client, exists := s.clientsByName[udpListener.ClientName]
+		s.mu.RUnlock()
+
+		if !exists {
+			log.Printf("[Server] UDP: Client not connected: %s", udpListener.ClientName)
+			continue
+		}
+
+		// 通过TCP控制通道发送UDP数据
+		msg, err := protocol.NewUDPDataMessage(
+			udpListener.Tunnel.Name,
+			udpListener.Tunnel.ClientPort,
+			remoteAddrStr,
+			buf[:n],
+		)
+		if err != nil {
+			log.Printf("[Server] Failed to create UDP data message: %v", err)
+			continue
+		}
+
+		client.mu.Lock()
+		err = protocol.SendMessage(client.Conn, msg)
+		client.mu.Unlock()
+
+		if err != nil {
+			log.Printf("[Server] Failed to send UDP data to client: %v", err)
+		}
+	}
+}
+
+// handleUDPDataFromClient 处理来自客户端的UDP数据响应
+func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Message) {
+	udm, err := protocol.ParseUDPDataMessage(msg.Payload)
+	if err != nil {
+		log.Printf("[Server] Failed to parse UDP data message: %v", err)
+		return
+	}
+
+	// 查找对应的UDP监听器
+	var udpListener *UDPListener
+	s.mu.RLock()
+	for _, ul := range s.udpListeners {
+		if ul.Tunnel.Name == udm.TunnelName {
+			udpListener = ul
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if udpListener == nil {
+		log.Printf("[Server] UDP listener not found for tunnel: %s", udm.TunnelName)
+		return
+	}
+
+	// 获取远程地址
+	udpListener.mu.RLock()
+	remoteAddr, exists := udpListener.remoteAddrs[udm.RemoteAddr]
+	udpListener.mu.RUnlock()
+
+	if !exists {
+		log.Printf("[Server] Remote address not found: %s", udm.RemoteAddr)
+		return
+	}
+
+	// 发送UDP响应
+	_, err = udpListener.Conn.WriteToUDP(udm.Data, remoteAddr)
+	if err != nil {
+		log.Printf("[Server] Failed to send UDP response: %v", err)
+	}
 }
 
 // acceptClients 接受客户端控制连接
@@ -288,6 +435,8 @@ func (s *Server) handleClientMessages(client *ClientConn) {
 			s.handleDataFromClient(client, msg)
 		case protocol.MsgTypeDisconnect:
 			s.handleDisconnectFromClient(client, msg)
+		case protocol.MsgTypeUDPData:
+			s.handleUDPDataFromClient(client, msg)
 		default:
 			log.Printf("[Server] Unknown message type from client %s: %d", client.Name, msg.Type)
 		}
@@ -331,14 +480,20 @@ func (s *Server) handleConnReady(client *ClientConn, msg *protocol.Message) {
 
 	if !cr.Success {
 		log.Printf("[Server] Client failed to connect to local service: %s", cr.Message)
-		proxyConn.ExternalConn.Close()
-		s.mu.Lock()
-		delete(s.connections, cr.ConnID)
-		s.mu.Unlock()
+		// 发送失败信号
+		select {
+		case proxyConn.Ready <- false:
+		default:
+		}
 		return
 	}
 
 	log.Printf("[Server] Connection ready: %s", cr.ConnID)
+	// 发送就绪信号
+	select {
+	case proxyConn.Ready <- true:
+	default:
+	}
 }
 
 // handleDataFromClient 处理来自客户端的数据
@@ -421,6 +576,7 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		ExternalConn: conn,
 		RemoteAddr:   conn.RemoteAddr().String(),
 		CreatedAt:    time.Now(),
+		Ready:        make(chan bool, 1),
 	}
 
 	s.mu.Lock()
@@ -450,7 +606,27 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		return
 	}
 
-	// 读取外部连接数据并转发给客户端
+	// 等待客户端连接就绪
+	select {
+	case ready := <-proxyConn.Ready:
+		if !ready {
+			log.Printf("[Server] Client failed to connect to local service for %s", connID)
+			conn.Close()
+			s.mu.Lock()
+			delete(s.connections, connID)
+			s.mu.Unlock()
+			return
+		}
+	case <-time.After(10 * time.Second):
+		log.Printf("[Server] Timeout waiting for client ready: %s", connID)
+		conn.Close()
+		s.mu.Lock()
+		delete(s.connections, connID)
+		s.mu.Unlock()
+		return
+	}
+
+	// 客户端已就绪，开始读取外部连接数据并转发给客户端
 	s.forwardFromExternal(proxyConn, client)
 }
 
@@ -502,15 +678,15 @@ func (s *Server) GetConfig() *config.ServerConfig {
 // Reload 重载配置
 func (s *Server) Reload(newConfig *config.ServerConfig) error {
 	log.Printf("[Server] Reloading configuration...")
-	
+
 	// 停止当前服务
 	s.Stop()
-	
+
 	// 更新配置
 	s.mu.Lock()
 	s.config = newConfig
 	s.mu.Unlock()
-	
+
 	// 重新启动服务
 	return s.Start()
 }
@@ -535,6 +711,12 @@ func (s *Server) Stop() {
 	}
 	// 清空监听器map
 	s.tunnelListeners = make(map[int]net.Listener)
+
+	// 关闭所有UDP监听器
+	for _, udpListener := range s.udpListeners {
+		udpListener.Conn.Close()
+	}
+	s.udpListeners = make(map[int]*UDPListener)
 
 	// 关闭所有客户端连接
 	for _, client := range s.clients {
