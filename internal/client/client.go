@@ -21,11 +21,54 @@ type Client struct {
 	udpConns      map[int]*UDPConnInfo    // clientPort -> UDP connection info
 	nativeUDPConn *net.UDPConn            // 与服务端的原生UDP传输连接
 	serverUDPAddr *net.UDPAddr            // 服务端UDP地址
+	sendQueue     chan *protocol.Message  // 发送队列，支持高并发异步发送
+	sendDone      chan struct{}           // 发送协程退出信号
 	mu            sync.RWMutex
 	udpMu         sync.RWMutex // UDP专用锁，减少锁竞争
 	running       bool
 	connected     bool
 	stopChan      chan struct{}
+}
+
+// sendLoop 发送循环，从队列中读取消息并发送
+func (c *Client) sendLoop() {
+	for msg := range c.sendQueue {
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
+		if conn == nil {
+			continue
+		}
+		if err := protocol.SendMessage(conn, msg); err != nil {
+			log.Printf("[Client] Failed to send message: %v", err)
+			// 排空队列
+			for range c.sendQueue {
+			}
+			break
+		}
+	}
+	close(c.sendDone)
+}
+
+// send 异步发送消息（非阻塞）
+func (c *Client) send(msg *protocol.Message) bool {
+	select {
+	case c.sendQueue <- msg:
+		return true
+	default:
+		log.Printf("[Client] Warning: send queue full, dropping message")
+		return false
+	}
+}
+
+// sendSync 同步发送消息（用于关键消息）
+func (c *Client) sendSyncMsg(msg *protocol.Message) bool {
+	select {
+	case c.sendQueue <- msg:
+		return true
+	case <-c.sendDone:
+		return false
+	}
 }
 
 // TCPConnInfo TCP连接信息，支持异步数据处理
@@ -79,6 +122,11 @@ func (c *Client) Start() error {
 			time.Sleep(time.Duration(c.config.Client.ReconnectInterval) * time.Second)
 			continue
 		}
+
+		// 初始化发送队列
+		c.sendQueue = make(chan *protocol.Message, 1024)
+		c.sendDone = make(chan struct{})
+		go c.sendLoop()
 
 		// 处理消息
 		c.handleMessages()
@@ -230,13 +278,7 @@ func (c *Client) sendHeartbeat() {
 	if err != nil {
 		return
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		protocol.SendMessage(c.conn, msg)
-	}
+	c.send(msg)
 }
 
 // handleMessages 处理服务端消息
@@ -340,13 +382,7 @@ func (c *Client) sendConnReady(connID string, success bool, message string) {
 	if err != nil {
 		return
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		protocol.SendMessage(c.conn, msg)
-	}
+	c.sendSyncMsg(msg)
 }
 
 // forwardFromLocal 从本地连接转发数据到服务端
@@ -382,11 +418,10 @@ func (c *Client) forwardFromLocal(connID string, connInfo *TCPConnInfo) {
 			return
 		}
 
-		c.mu.Lock()
-		err = protocol.SendMessage(c.conn, msg)
-		c.mu.Unlock()
-
-		if err != nil {
+		// 异步发送，避免阻塞其他连接
+		if !c.send(msg) {
+			// 队列满，断开连接
+			log.Printf("[Client] Send queue full for connection %s, closing", connID)
 			return
 		}
 	}
@@ -398,13 +433,7 @@ func (c *Client) sendDisconnect(connID, reason string) {
 	if err != nil {
 		return
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		protocol.SendMessage(c.conn, msg)
-	}
+	c.send(msg)
 }
 
 // handleData 处理服务端发来的数据
@@ -784,12 +813,8 @@ func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data 
 			return
 		}
 
-		c.mu.Lock()
-		err = protocol.SendMessage(c.conn, msg)
-		c.mu.Unlock()
-
-		if err != nil {
-			log.Printf("[Client] Failed to send UDP response to server: %v", err)
+		if !c.send(msg) {
+			log.Printf("[Client] Failed to send UDP response to server: queue full")
 		}
 	}
 }
@@ -930,6 +955,17 @@ func (c *Client) cleanup() {
 	}
 	c.serverUDPAddr = nil
 
+	// 关闭发送队列
+	if c.sendQueue != nil {
+		select {
+		case <-c.sendDone:
+			// 已经关闭
+		default:
+			close(c.sendQueue)
+			<-c.sendDone // 等待发送协程退出
+		}
+	}
+
 	// 关闭服务端连接
 	if c.conn != nil {
 		c.conn.Close()
@@ -975,13 +1011,5 @@ func (c *Client) ReportError(errorType, message string) {
 		log.Printf("[Client] Failed to create error report: %v", err)
 		return
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		if err := protocol.SendMessage(c.conn, msg); err != nil {
-			log.Printf("[Client] Failed to send error report: %v", err)
-		}
-	}
+	c.send(msg)
 }

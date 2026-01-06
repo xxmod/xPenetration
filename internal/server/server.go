@@ -175,7 +175,58 @@ type ClientConn struct {
 	Tunnels       []protocol.Tunnel
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
-	mu            sync.Mutex
+	sendQueue     chan *protocol.Message // 发送队列，支持高并发异步发送
+	sendDone      chan struct{}          // 发送协程退出信号
+	mu            sync.Mutex             // 用于一般操作
+}
+
+// sendLoop 发送循环，从队列中读取消息并发送
+func (c *ClientConn) sendLoop() {
+	for msg := range c.sendQueue {
+		if err := protocol.SendMessage(c.Conn, msg); err != nil {
+			log.Printf("[Server] Failed to send message to client %s: %v", c.Name, err)
+			c.Conn.Close()
+			// 排空队列
+			for range c.sendQueue {
+			}
+			break
+		}
+	}
+	close(c.sendDone)
+}
+
+// Send 异步发送消息到客户端（非阻塞）
+func (c *ClientConn) Send(msg *protocol.Message) bool {
+	select {
+	case c.sendQueue <- msg:
+		return true
+	default:
+		// 队列满，记录警告但不阻塞
+		log.Printf("[Server] Warning: send queue full for client %s, dropping message", c.Name)
+		return false
+	}
+}
+
+// SendSync 同步发送消息（用于关键消息，会阻塞等待队列空间）
+func (c *ClientConn) SendSync(msg *protocol.Message) bool {
+	select {
+	case c.sendQueue <- msg:
+		return true
+	case <-c.sendDone:
+		return false
+	}
+}
+
+// Close 关闭客户端连接
+func (c *ClientConn) Close() {
+	c.Conn.Close()
+	// 关闭发送队列会导致 sendLoop 退出
+	select {
+	case <-c.sendDone:
+		// 已经关闭
+	default:
+		close(c.sendQueue)
+	}
 }
 
 // ProxyConn 代理连接信息
@@ -562,12 +613,8 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 			return
 		}
 
-		client.mu.Lock()
-		err = protocol.SendMessage(client.Conn, msg)
-		client.mu.Unlock()
-
-		if err != nil {
-			log.Printf("[Server] Failed to send UDP data to client: %v", err)
+		if !client.Send(msg) {
+			log.Printf("[Server] Failed to send UDP data to client: queue full")
 		}
 	}
 }
@@ -693,14 +740,19 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		Tunnels:       clientConfig.Tunnels,
 		ConnectedAt:   time.Now(),
 		LastHeartbeat: time.Now(),
+		sendQueue:     make(chan *protocol.Message, 1024), // 缓冲队列，支持突发流量
+		sendDone:      make(chan struct{}),
 	}
+
+	// 启动发送协程
+	go clientConn.sendLoop()
 
 	// 注册客户端
 	s.mu.Lock()
 	// 断开同名的旧连接
 	if oldClient, exists := s.clientsByName[authReq.ClientName]; exists {
 		log.Printf("[Server] Disconnecting old connection for client: %s", authReq.ClientName)
-		oldClient.Conn.Close()
+		oldClient.Close()
 		delete(s.clients, oldClient.ID)
 	}
 	s.clients[clientID] = clientConn
@@ -813,9 +865,7 @@ func (s *Server) handleHeartbeat(client *ClientConn, msg *protocol.Message) {
 
 	// 发送心跳确认
 	ackMsg, _ := protocol.NewHeartbeatAck(hb.Timestamp)
-	client.mu.Lock()
-	protocol.SendMessage(client.Conn, ackMsg)
-	client.mu.Unlock()
+	client.Send(ackMsg)
 }
 
 // handleConnReady 处理连接就绪消息
@@ -955,12 +1005,8 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		return
 	}
 
-	client.mu.Lock()
-	err = protocol.SendMessage(client.Conn, msg)
-	client.mu.Unlock()
-
-	if err != nil {
-		log.Printf("[Server] Failed to send new connection message: %v", err)
+	if !client.SendSync(msg) {
+		log.Printf("[Server] Failed to send new connection message: client disconnected")
 		conn.Close()
 		s.mu.Lock()
 		delete(s.connections, connID)
@@ -1002,9 +1048,7 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 
 		// 通知客户端断开连接
 		msg, _ := protocol.NewDisconnectMessage(proxyConn.ID, "external connection closed")
-		client.mu.Lock()
-		protocol.SendMessage(client.Conn, msg)
-		client.mu.Unlock()
+		client.Send(msg)
 	}()
 
 	buf := make([]byte, 32*1024)
@@ -1020,11 +1064,9 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 			return
 		}
 
-		client.mu.Lock()
-		err = protocol.SendMessage(client.Conn, msg)
-		client.mu.Unlock()
-
-		if err != nil {
+		if !client.Send(msg) {
+			// 队列满，客户端处理不过来，断开连接
+			log.Printf("[Server] Send queue full for connection %s, closing", proxyConn.ID)
 			return
 		}
 
@@ -1108,7 +1150,7 @@ func (s *Server) Stop() {
 
 	// 关闭所有客户端连接
 	for _, client := range s.clients {
-		client.Conn.Close()
+		client.Close()
 	}
 	// 清空客户端map
 	s.clients = make(map[string]*ClientConn)

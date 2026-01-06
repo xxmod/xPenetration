@@ -265,7 +265,11 @@ func SendMessage(conn net.Conn, msg *Message) error {
 	if err != nil {
 		return err
 	}
+	// 设置写超时，避免长时间阻塞其他连接
+	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	_, err = conn.Write(data)
+	// 清除写超时
+	conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
