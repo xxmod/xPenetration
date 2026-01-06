@@ -133,6 +133,7 @@ type Server struct {
 	clientUDPAddrs  map[string]*net.UDPAddr // clientName -> client UDP address
 	metrics         *Metrics                // 运行时观测指标
 	logs            []LogEntry              // 日志记录
+	connIDCounter   atomic.Uint64           // 连接ID计数器，确保唯一性
 	mu              sync.RWMutex
 	logMu           sync.RWMutex // 日志专用锁
 	running         bool
@@ -923,8 +924,8 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		return
 	}
 
-	// 生成连接ID
-	connID := fmt.Sprintf("conn-%d", time.Now().UnixNano())
+	// 生成连接ID（使用原子计数器确保唯一性）
+	connID := fmt.Sprintf("conn-%d-%d", time.Now().Unix(), s.connIDCounter.Add(1))
 
 	// 创建代理连接记录
 	proxyConn := &ProxyConn{
