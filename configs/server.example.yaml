@@ -15,7 +15,7 @@ server:
 # 客户端配置列表
 # 每个客户端可以配置专属密钥和分配的隧道
 clients:
-  # 客户端1：SSH服务穿透
+  # 客户端1：SSH服务穿透（本机）
   - name: "office-pc"
     # 客户端专属密钥（可选，为空则使用全局密钥）
     secret_key: ""
@@ -25,10 +25,22 @@ clients:
         client_port: 22      # 客户端本地SSH端口
         server_port: 10022   # 服务端暴露端口
         protocol: "tcp"
+        # target_ip: "127.0.0.1"  # 可选：目标IP，默认为127.0.0.1（本机）
       - name: "rdp"
         client_port: 3389    # 客户端本地RDP端口
         server_port: 13389   # 服务端暴露端口
         protocol: "tcp"
+      # 穿透同一局域网内其他设备的示例
+      - name: "nas-ssh"
+        client_port: 22      # NAS设备的SSH端口
+        server_port: 20022   # 服务端暴露端口
+        protocol: "tcp"
+        target_ip: "192.168.1.100"  # 局域网内NAS设备的IP地址
+      - name: "router-web"
+        client_port: 80      # 路由器Web管理端口
+        server_port: 20080   # 服务端暴露端口
+        protocol: "tcp"
+        target_ip: "192.168.1.1"    # 局域网内路由器的IP地址
 
   # 客户端2：Web服务穿透
   - name: "dev-server"
@@ -60,7 +72,7 @@ clients:
         server_port: 16379
         protocol: "tcp"
 
-  # 客户端4：UDP服务穿透示例
+  # 客户端4：UDP服务穿透示例（包括局域网设备）
   - name: "game-server"
     secret_key: "game-server-secret-key"
     tunnels:
@@ -79,6 +91,13 @@ clients:
         server_port: 15060
         protocol: "udp"
         udp_mode: "tcp"       # 可选：使用TCP封装（在某些NAT环境下更稳定，但可能丢包）
+      # 穿透局域网内其他设备的UDP服务
+      - name: "camera-udp"
+        client_port: 8554     # 摄像头RTSP/UDP端口
+        server_port: 18554
+        protocol: "udp"
+        udp_mode: "native"
+        target_ip: "192.168.1.50"  # 局域网内摄像头的IP地址
 
 # 日志配置
 log:

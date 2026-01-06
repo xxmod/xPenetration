@@ -160,6 +160,7 @@
                                         <th>协议</th>
                                         <th>UDP模式</th>
                                         <th>服务端端口 (公网)</th>
+                                        <th>目标IP</th>
                                         <th>客户端端口 (内网)</th>
                                         <th style="width: 50px;">操作</th>
                                     </tr>
@@ -180,6 +181,7 @@
                                             </select>
                                         </td>
                                         <td><input type="number" class="form-control form-control-sm" v-model.number="tunnel.server_port"></td>
+                                        <td><input type="text" class="form-control form-control-sm" v-model="tunnel.target_ip" placeholder="127.0.0.1"></td>
                                         <td><input type="number" class="form-control form-control-sm" v-model.number="tunnel.client_port"></td>
                                         <td class="text-center">
                                             <button class="btn btn-sm btn-link text-danger p-0" @click="removeTunnel(index, tIndex)">
@@ -352,7 +354,8 @@
                         protocol: 'tcp',
                         udp_mode: 'native',
                         server_port: 0,
-                        client_port: 0
+                        client_port: 0,
+                        target_ip: ''
                     });
                 },
                 removeTunnel(clientIndex, tunnelIndex) {

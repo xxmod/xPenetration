@@ -8,7 +8,8 @@
 
 - 密钥验证（支持全局密钥与客户端独立密钥）
 - TCP/UDP 隧道（在服务端映射端口，对外提供访问）
-- 支持使用TCP封装UDP传输UDP数据包（仅作为备用选项，会导致高丢包率）
+- 局域网设备穿透（可穿透同一局域网内其他设备的端口，不仅限于本机）
+- 支持使用TCP封装UDP传输UDP数据包（作为备用选项，可能导致丢包）
 - Web 管理界面（查看/调整服务端配置）
 - 客户端自动重连
 
@@ -45,7 +46,6 @@ Web 管理界面默认地址：`http://0.0.0.0:7500`（以配置为准）。
 
 说明：如果未找到配置文件，服务端会以默认端口启动 Web 界面用于配置，此时会根据web生成配置文件。
 
-
 ### 3) 启动客户端
 
 > 于无公网ip的客户端启动
@@ -63,7 +63,6 @@ bin/xpen-client -c client.yaml
 bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 ```
 
-
 ## 配置要点
 
 服务端配置示例见 `configs/server.example.yaml`：
@@ -76,6 +75,7 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
   - `client_port`：客户端本地服务端口
   - `server_port`：服务端对外暴露端口
   - `protocol`：`tcp` 或 `udp`
+  - `target_ip`：（可选）目标设备IP地址，默认为 `127.0.0.1`（本机）。可设置为局域网内其他设备的IP地址（如 `192.168.1.100`），实现穿透同一局域网下其他设备的端口
 
 客户端配置示例见 `configs/client.example.yaml`：
 
@@ -83,6 +83,63 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 - `client.client_name`：必须与服务端 `clients[].name` 匹配
 - `client.secret_key`：需与服务端全局密钥或该客户端独立密钥一致
 
-## License
+## 使用场景示例
 
-本项目基于MIT许可证
+### 场景1：穿透本机端口
+
+在客户端所在机器上运行SSH服务（22端口），将其映射到服务端的10022端口：
+
+```yaml
+tunnels:
+  - name: "ssh"
+    client_port: 22
+    server_port: 10022
+    protocol: "tcp"
+    # target_ip 默认为 127.0.0.1，可省略
+```
+
+访问方式：`ssh user@your-server.com -p 10022`
+
+### 场景2：穿透同一局域网下其他设备
+
+客户端在家庭局域网中，想要穿透局域网内的NAS设备（IP: 192.168.1.100）的SSH服务：
+
+```yaml
+tunnels:
+  - name: "nas-ssh"
+    client_port: 22
+    server_port: 20022
+    protocol: "tcp"
+    target_ip: "192.168.1.100"  # NAS设备的局域网IP
+```
+
+访问方式：`ssh user@your-server.com -p 20022`
+
+### 场景3：穿透路由器管理界面
+
+穿透路由器（IP: 192.168.1.1）的Web管理界面：
+
+```yaml
+tunnels:
+  - name: "router-web"
+    client_port: 80
+    server_port: 20080
+    protocol: "tcp"
+    target_ip: "192.168.1.1"
+```
+
+访问方式：在浏览器访问 `http://your-server.com:20080`
+
+### 场景4：穿透摄像头UDP流
+
+穿透局域网内摄像头（IP: 192.168.1.50）的RTSP/UDP流：
+
+```yaml
+tunnels:
+  - name: "camera-udp"
+    client_port: 8554
+    server_port: 18554
+    protocol: "udp"
+    udp_mode: "native"
+    target_ip: "192.168.1.50"
+```

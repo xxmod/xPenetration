@@ -75,6 +75,7 @@ type Tunnel struct {
 	ServerPort int    `json:"server_port" yaml:"server_port"` // 服务端暴露端口
 	Protocol   string `json:"protocol" yaml:"protocol"`       // tcp/udp
 	UDPMode    string `json:"udp_mode" yaml:"udp_mode"`       // UDP隧道模式: native(原生UDP) 或 tcp(TCP封装,备用)
+	TargetIP   string `json:"target_ip" yaml:"target_ip"`     // 目标IP地址，默认为127.0.0.1（本机），可设置为局域网内其他设备IP
 }
 
 // NewConnection 新连接通知
@@ -83,6 +84,7 @@ type NewConnection struct {
 	TunnelName string `json:"tunnel_name"`
 	ClientPort int    `json:"client_port"`
 	RemoteAddr string `json:"remote_addr"`
+	TargetIP   string `json:"target_ip"` // 目标IP地址
 }
 
 // ConnReady 连接就绪通知
@@ -287,12 +289,13 @@ func NewTunnelConfig(tunnels []Tunnel) (*Message, error) {
 }
 
 // NewConnectionMessage 创建新连接通知消息
-func NewConnectionMessage(connID, tunnelName string, clientPort int, remoteAddr string) (*Message, error) {
+func NewConnectionMessage(connID, tunnelName string, clientPort int, remoteAddr string, targetIP string) (*Message, error) {
 	nc := NewConnection{
 		ConnID:     connID,
 		TunnelName: tunnelName,
 		ClientPort: clientPort,
 		RemoteAddr: remoteAddr,
+		TargetIP:   targetIP,
 	}
 	payload, err := json.Marshal(nc)
 	if err != nil {

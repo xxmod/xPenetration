@@ -715,7 +715,7 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 	log.Printf("[Server] New connection %s: %s -> tunnel %s", connID, conn.RemoteAddr().String(), tunnel.Name)
 
 	// 通知客户端有新连接
-	msg, err := protocol.NewConnectionMessage(connID, tunnel.Name, tunnel.ClientPort, conn.RemoteAddr().String())
+	msg, err := protocol.NewConnectionMessage(connID, tunnel.Name, tunnel.ClientPort, conn.RemoteAddr().String(), tunnel.TargetIP)
 	if err != nil {
 		log.Printf("[Server] Failed to create new connection message: %v", err)
 		conn.Close()

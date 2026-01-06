@@ -261,8 +261,12 @@ func (c *Client) handleNewConnection(msg *protocol.Message) {
 
 	log.Printf("[Client] New connection request: %s -> local port %d", nc.ConnID, nc.ClientPort)
 
-	// 连接到本地服务
-	localAddr := fmt.Sprintf("127.0.0.1:%d", nc.ClientPort)
+	// 连接到本地服务（或局域网内其他设备）
+	targetIP := nc.TargetIP
+	if targetIP == "" {
+		targetIP = "127.0.0.1"
+	}
+	localAddr := fmt.Sprintf("%s:%d", targetIP, nc.ClientPort)
 	localConn, err := net.DialTimeout("tcp", localAddr, 5*time.Second)
 	if err != nil {
 		log.Printf("[Client] Failed to connect to local service %s: %v", localAddr, err)
@@ -503,8 +507,12 @@ func (c *Client) handleNativeUDPData(pkt *protocol.NativeUDPPacket) {
 				return
 			}
 
-			// 创建新的UDP连接到本地服务
-			localAddr := fmt.Sprintf("127.0.0.1:%d", pkt.ClientPort)
+			// 创建新的UDP连接到本地服务（或局域网内其他设备）
+			targetIP := tunnel.TargetIP
+			if targetIP == "" {
+				targetIP = "127.0.0.1"
+			}
+			localAddr := fmt.Sprintf("%s:%d", targetIP, pkt.ClientPort)
 			udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
 			if err != nil {
 				c.udpMu.Unlock()
@@ -574,8 +582,15 @@ func (c *Client) handleUDPData(msg *protocol.Message) {
 				}
 			}
 
-			// 创建新的UDP连接到本地服务
-			localAddr := fmt.Sprintf("127.0.0.1:%d", udm.ClientPort)
+			// 创建新的UDP连接到本地服务（或局域网内其他设备）
+			targetIP := ""
+			if tunnel != nil {
+				targetIP = tunnel.TargetIP
+			}
+			if targetIP == "" {
+				targetIP = "127.0.0.1"
+			}
+			localAddr := fmt.Sprintf("%s:%d", targetIP, udm.ClientPort)
 			udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
 			if err != nil {
 				c.udpMu.Unlock()
