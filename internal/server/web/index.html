@@ -9,18 +9,35 @@
     <style>
         [v-cloak] { display: none; }
         .sidebar { min-height: 100vh; background-color: #343a40; color: white; }
-        .nav-link { color: rgba(255,255,255,.75); cursor: pointer; }
-        .nav-link:hover, .nav-link.active { color: white; background-color: rgba(255,255,255,.1); }
+        .sidebar .nav-link { color: rgba(255,255,255,.75); cursor: pointer; }
+        .sidebar .nav-link:hover, .sidebar .nav-link.active { color: white; background-color: rgba(255,255,255,.1); }
+        .offcanvas .nav-link { color: #212529; cursor: pointer; }
+        .offcanvas .nav-link:hover, .offcanvas .nav-link.active { color: white; background-color: #0d6efd; }
         .card { margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,.05); }
         .status-indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
         .status-online { background-color: #28a745; }
         .status-offline { background-color: #dc3545; }
+        .table td, .table th { vertical-align: middle; }
+        .text-wrap { white-space: normal; word-break: break-word; }
+        @media (max-width: 767.98px) {
+            body { font-size: 0.9rem; }
+            .p-4 { padding: 1rem !important; }
+            .card .display-4 { font-size: 1.75rem; }
+            .card-title { font-size: 0.95rem; }
+            h2 { font-size: 1.35rem; }
+            h4 { font-size: 1.15rem; }
+            h5 { font-size: 1rem; }
+            h6 { font-size: 0.9rem; }
+            .table { font-size: 0.85rem; }
+            .table td, .table th { padding: 0.5rem; }
+            .btn { font-size: 0.85rem; }
+        }
     </style>
 </head>
 <body>
     <div id="app" v-cloak class="d-flex">
         <!-- Sidebar -->
-        <div class="d-flex flex-column flex-shrink-0 p-3 sidebar" style="width: 280px;">
+        <div class="d-none d-md-flex flex-column flex-shrink-0 p-3 sidebar" style="width: 280px;">
             <a href="/" class="d-flex align-items-center mb-3 mb-md-0 me-md-auto text-white text-decoration-none">
                 <i class="bi bi-hdd-network fs-4 me-2"></i>
                 <span class="fs-4">xPenetration</span>
@@ -60,6 +77,53 @@
 
         <!-- Main Content -->
         <div class="flex-grow-1 p-4 bg-light" style="height: 100vh; overflow-y: auto;">
+            <!-- Mobile Navbar & Offcanvas -->
+            <nav class="navbar navbar-dark bg-dark d-md-none sticky-top mb-3 rounded">
+                <div class="container-fluid">
+                    <a class="navbar-brand" href="#">
+                        <i class="bi bi-hdd-network me-2"></i>xPenetration
+                    </a>
+                    <button class="navbar-toggler" type="button" data-bs-toggle="offcanvas" data-bs-target="#mobileSidebar" aria-controls="mobileSidebar" aria-label="切换导航">
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                </div>
+            </nav>
+            <div class="offcanvas offcanvas-start" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
+                <div class="offcanvas-header bg-dark text-white">
+                    <h5 class="offcanvas-title" id="mobileSidebarLabel">导航菜单</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="关闭"></button>
+                </div>
+                <div class="offcanvas-body">
+                    <ul class="nav nav-pills flex-column mb-auto">
+                        <li class="nav-item">
+                            <a class="nav-link" :class="{ active: currentView === 'dashboard' }" @click="switchView('dashboard')" data-bs-dismiss="offcanvas">
+                                <i class="bi bi-speedometer2 me-2"></i> 仪表盘
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link" :class="{ active: currentView === 'clients' }" @click="switchView('clients')" data-bs-dismiss="offcanvas">
+                                <i class="bi bi-people me-2"></i> 客户端管理
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link" :class="{ active: currentView === 'logs' }" @click="switchView('logs')" data-bs-dismiss="offcanvas">
+                                <i class="bi bi-journal-text me-2"></i> 系统日志
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link" :class="{ active: currentView === 'settings' }" @click="switchView('settings')" data-bs-dismiss="offcanvas">
+                                <i class="bi bi-gear me-2"></i> 服务端设置
+                            </a>
+                        </li>
+                    </ul>
+                    <hr>
+                    <div class="d-flex align-items-center">
+                        <i class="bi bi-circle-fill text-success me-2" v-if="serverStatus"></i>
+                        <i class="bi bi-circle-fill text-danger me-2" v-else></i>
+                        <strong>{{ serverStatus ? '运行中' : '已停止' }}</strong>
+                    </div>
+                </div>
+            </div>
             
             <!-- Dashboard -->
             <div v-if="currentView === 'dashboard'">
@@ -132,8 +196,8 @@
                                         <th>协议</th>
                                         <th>端口</th>
                                         <th>流量 (入/出)</th>
-                                        <th>报文 (入/出)</th>
-                                        <th>回退</th>
+                                        <th class="d-none d-sm-table-cell">报文 (入/出)</th>
+                                        <th class="d-none d-sm-table-cell">回退</th>
                                         <th>最近流量</th>
                                     </tr>
                                 </thead>
@@ -143,8 +207,8 @@
                                         <td>{{ tm.protocol.toUpperCase() }}</td>
                                         <td>{{ tm.server_port }} → {{ tm.client_port }}</td>
                                         <td>{{ formatBytes(getBytes(tm, 'in')) }} / {{ formatBytes(getBytes(tm, 'out')) }}</td>
-                                        <td>{{ getPackets(tm, 'in') }} / {{ getPackets(tm, 'out') }}</td>
-                                        <td>{{ getFallback(tm) }}</td>
+                                        <td class="d-none d-sm-table-cell">{{ getPackets(tm, 'in') }} / {{ getPackets(tm, 'out') }}</td>
+                                        <td class="d-none d-sm-table-cell">{{ getFallback(tm) }}</td>
                                         <td>{{ tm.last_packet_at ? formatDate(tm.last_packet_at) : '暂无' }}</td>
                                     </tr>
                                     <tr v-if="!metrics.tunnels || metrics.tunnels.length === 0">
@@ -163,19 +227,19 @@
                             <table class="table table-hover">
                                 <thead>
                                     <tr>
-                                        <th>ID</th>
+                                        <th class="d-none d-sm-table-cell">ID</th>
                                         <th>客户端</th>
                                         <th>隧道</th>
-                                        <th>来源IP</th>
+                                        <th class="d-none d-sm-table-cell">来源IP</th>
                                         <th>建立时间</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <tr v-for="conn in connections" :key="conn.id">
-                                        <td>{{ conn.id }}</td>
+                                        <td class="d-none d-sm-table-cell">{{ conn.id }}</td>
                                         <td>{{ conn.client_id }}</td>
                                         <td>{{ conn.tunnel_name }} ({{ conn.server_port }} -> {{ conn.client_port }})</td>
-                                        <td>{{ conn.remote_addr }}</td>
+                                        <td class="d-none d-sm-table-cell">{{ conn.remote_addr }}</td>
                                         <td>{{ formatDate(conn.created_at) }}</td>
                                     </tr>
                                     <tr v-if="connections.length === 0">
@@ -376,9 +440,9 @@
                                     <tr>
                                         <th style="width: 180px;">时间</th>
                                         <th style="width: 80px;">级别</th>
-                                        <th style="width: 80px;">来源</th>
-                                        <th style="width: 120px;">客户端</th>
-                                        <th style="width: 120px;">类型</th>
+                                        <th class="d-none d-sm-table-cell" style="width: 80px;">来源</th>
+                                        <th class="d-none d-sm-table-cell" style="width: 120px;">客户端</th>
+                                        <th class="d-none d-sm-table-cell" style="width: 120px;">类型</th>
                                         <th>消息</th>
                                     </tr>
                                 </thead>
@@ -388,13 +452,13 @@
                                         <td>
                                             <span class="badge" :class="getLogLevelBadge(log.level)">{{ log.level.toUpperCase() }}</span>
                                         </td>
-                                        <td>
+                                        <td class="d-none d-sm-table-cell">
                                             <span class="badge" :class="log.source === 'client' ? 'bg-info' : 'bg-secondary'">
                                                 {{ log.source === 'client' ? '客户端' : '服务端' }}
                                             </span>
                                         </td>
-                                        <td>{{ log.client_name || '-' }}</td>
-                                        <td><code>{{ log.type }}</code></td>
+                                        <td class="d-none d-sm-table-cell">{{ log.client_name || '-' }}</td>
+                                        <td class="d-none d-sm-table-cell"><code>{{ log.type }}</code></td>
                                         <td>{{ log.message }}</td>
                                     </tr>
                                     <tr v-if="filteredLogs.length === 0">
@@ -417,6 +481,7 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/vue@3.2.47/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script>
