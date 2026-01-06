@@ -43,6 +43,7 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/stats", ws.handleStats)
 	ws.mux.HandleFunc("/api/clients", ws.handleClients)
 	ws.mux.HandleFunc("/api/connections", ws.handleConnections)
+	ws.mux.HandleFunc("/api/metrics", ws.handleMetrics)
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
 	ws.mux.HandleFunc("/api/config", ws.handleConfig)
 	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
@@ -118,6 +119,17 @@ func (ws *WebServer) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	stats := ws.server.GetStats()
 	ws.writeJSON(w, stats)
+}
+
+// handleMetrics 处理运行时指标请求
+func (ws *WebServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	metrics := ws.server.GetMetrics()
+	ws.writeJSON(w, metrics)
 }
 
 // handleClients 处理客户端列表请求

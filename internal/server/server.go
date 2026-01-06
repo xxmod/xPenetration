@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xpenetration/internal/config"
@@ -130,6 +131,7 @@ type Server struct {
 	controlListener net.Listener            // 控制端口监听器
 	nativeUDPConn   *net.UDPConn            // 原生UDP传输连接（用于与客户端之间的UDP数据传输）
 	clientUDPAddrs  map[string]*net.UDPAddr // clientName -> client UDP address
+	metrics         *Metrics                // 运行时观测指标
 	logs            []LogEntry              // 日志记录
 	mu              sync.RWMutex
 	logMu           sync.RWMutex // 日志专用锁
@@ -182,6 +184,7 @@ type ProxyConn struct {
 	TunnelName   string
 	ClientPort   int
 	ServerPort   int
+	Tunnel       protocol.Tunnel
 	ExternalConn net.Conn
 	RemoteAddr   string
 	CreatedAt    time.Time
@@ -198,6 +201,7 @@ func NewServer(cfg *config.ServerConfig) *Server {
 		udpListeners:    make(map[int]*UDPListener),
 		connections:     make(map[string]*ProxyConn),
 		clientUDPAddrs:  make(map[string]*net.UDPAddr),
+		metrics:         newMetrics(),
 		logs:            make([]LogEntry, 0),
 		stopChan:        make(chan struct{}),
 	}
@@ -368,6 +372,8 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 		_, err = udpListener.Conn.WriteToUDP(pkt.Data, entry.Addr)
 		if err != nil {
 			log.Printf("[Server] Failed to send UDP response to external client: %v", err)
+		} else {
+			s.metrics.recordUDPOutbound(udpListener.Tunnel, len(pkt.Data), false)
 		}
 	}
 }
@@ -505,6 +511,9 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 	}
 	udpListener.mu.Unlock()
 
+	// 记录入口指标（外部 -> 服务端）
+	s.metrics.recordUDPInbound(udpListener.Tunnel, len(data))
+
 	// 查找客户端
 	s.mu.RLock()
 	client, exists := s.clientsByName[udpListener.ClientName]
@@ -600,6 +609,9 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 	_, err = udpListener.Conn.WriteToUDP(udm.Data, entry.Addr)
 	if err != nil {
 		log.Printf("[Server] Failed to send UDP response: %v", err)
+	} else {
+		// 该数据通过TCP回退通道抵达，视为一次回退发送
+		s.metrics.recordUDPOutbound(udpListener.Tunnel, len(udm.Data), true)
 	}
 }
 
@@ -861,7 +873,11 @@ func (s *Server) handleDataFromClient(client *ClientConn, msg *protocol.Message)
 	if err != nil {
 		log.Printf("[Server] Failed to write to external connection: %v", err)
 		proxyConn.ExternalConn.Close()
+		return
 	}
+
+	// 记录TCP出站（内网->外部）
+	s.metrics.recordTCPOutbound(proxyConn.Tunnel, len(dm.Data))
 }
 
 // handleDisconnectFromClient 处理来自客户端的断开连接消息
@@ -917,6 +933,7 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		TunnelName:   tunnel.Name,
 		ClientPort:   tunnel.ClientPort,
 		ServerPort:   tunnel.ServerPort,
+		Tunnel:       tunnel,
 		ExternalConn: conn,
 		RemoteAddr:   conn.RemoteAddr().String(),
 		CreatedAt:    time.Now(),
@@ -1009,6 +1026,9 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 		if err != nil {
 			return
 		}
+
+		// 记录TCP入站（外部->内网）
+		s.metrics.recordTCPInbound(proxyConn.Tunnel, n)
 	}
 }
 
@@ -1162,6 +1182,205 @@ type ConnectionInfo struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// Metrics 运行时观测指标
+type Metrics struct {
+	startTime     time.Time
+	udpPacketsIn  atomic.Uint64
+	udpPacketsOut atomic.Uint64
+	udpBytesIn    atomic.Uint64
+	udpBytesOut   atomic.Uint64
+	udpFallbacks  atomic.Uint64
+	tcpPacketsIn  atomic.Uint64
+	tcpPacketsOut atomic.Uint64
+	tcpBytesIn    atomic.Uint64
+	tcpBytesOut   atomic.Uint64
+	lastPacketAt  atomic.Int64
+
+	tunnelMu sync.RWMutex
+	tunnels  map[string]*TunnelMetrics
+}
+
+// TunnelMetrics 单隧道维度指标
+type TunnelMetrics struct {
+	TunnelName string
+	Protocol   string
+	ServerPort int
+	ClientPort int
+
+	udpPacketsIn  atomic.Uint64
+	udpPacketsOut atomic.Uint64
+	udpBytesIn    atomic.Uint64
+	udpBytesOut   atomic.Uint64
+	udpFallbacks  atomic.Uint64
+	tcpPacketsIn  atomic.Uint64
+	tcpPacketsOut atomic.Uint64
+	tcpBytesIn    atomic.Uint64
+	tcpBytesOut   atomic.Uint64
+	lastPacketAt  atomic.Int64
+}
+
+// MetricsSnapshot 可序列化的指标快照
+type MetricsSnapshot struct {
+	StartTime     time.Time               `json:"start_time"`
+	UDPPacketsIn  uint64                  `json:"udp_packets_in"`
+	UDPPacketsOut uint64                  `json:"udp_packets_out"`
+	UDPBytesIn    uint64                  `json:"udp_bytes_in"`
+	UDPBytesOut   uint64                  `json:"udp_bytes_out"`
+	UDPFallbacks  uint64                  `json:"udp_fallbacks"`
+	TCPPacketsIn  uint64                  `json:"tcp_packets_in"`
+	TCPPacketsOut uint64                  `json:"tcp_packets_out"`
+	TCPBytesIn    uint64                  `json:"tcp_bytes_in"`
+	TCPBytesOut   uint64                  `json:"tcp_bytes_out"`
+	LastPacketAt  time.Time               `json:"last_packet_at"`
+	Tunnels       []TunnelMetricsSnapshot `json:"tunnels"`
+}
+
+// TunnelMetricsSnapshot 单隧道指标快照
+type TunnelMetricsSnapshot struct {
+	TunnelName    string    `json:"tunnel_name"`
+	Protocol      string    `json:"protocol"`
+	ServerPort    int       `json:"server_port"`
+	ClientPort    int       `json:"client_port"`
+	UDPPacketsIn  uint64    `json:"udp_packets_in"`
+	UDPPacketsOut uint64    `json:"udp_packets_out"`
+	UDPBytesIn    uint64    `json:"udp_bytes_in"`
+	UDPBytesOut   uint64    `json:"udp_bytes_out"`
+	UDPFallbacks  uint64    `json:"udp_fallbacks"`
+	TCPPacketsIn  uint64    `json:"tcp_packets_in"`
+	TCPPacketsOut uint64    `json:"tcp_packets_out"`
+	TCPBytesIn    uint64    `json:"tcp_bytes_in"`
+	TCPBytesOut   uint64    `json:"tcp_bytes_out"`
+	LastPacketAt  time.Time `json:"last_packet_at"`
+}
+
+func newMetrics() *Metrics {
+	return &Metrics{
+		startTime: time.Now(),
+		tunnels:   make(map[string]*TunnelMetrics),
+	}
+}
+
+func (m *Metrics) getTunnelMetrics(tunnel protocol.Tunnel) *TunnelMetrics {
+	m.tunnelMu.RLock()
+	if tm, ok := m.tunnels[tunnel.Name]; ok {
+		m.tunnelMu.RUnlock()
+		return tm
+	}
+	m.tunnelMu.RUnlock()
+
+	m.tunnelMu.Lock()
+	defer m.tunnelMu.Unlock()
+	if tm, ok := m.tunnels[tunnel.Name]; ok {
+		return tm
+	}
+	tm := &TunnelMetrics{
+		TunnelName: tunnel.Name,
+		Protocol:   tunnel.Protocol,
+		ServerPort: tunnel.ServerPort,
+		ClientPort: tunnel.ClientPort,
+	}
+	m.tunnels[tunnel.Name] = tm
+	return tm
+}
+
+func (m *Metrics) recordUDPInbound(tunnel protocol.Tunnel, size int) {
+	m.udpPacketsIn.Add(1)
+	m.udpBytesIn.Add(uint64(size))
+	m.updateLastPacket(nil)
+	tm := m.getTunnelMetrics(tunnel)
+	tm.udpPacketsIn.Add(1)
+	tm.udpBytesIn.Add(uint64(size))
+	m.updateLastPacket(tm)
+}
+
+func (m *Metrics) recordUDPOutbound(tunnel protocol.Tunnel, size int, fallback bool) {
+	m.udpPacketsOut.Add(1)
+	m.udpBytesOut.Add(uint64(size))
+	if fallback {
+		m.udpFallbacks.Add(1)
+	}
+	m.updateLastPacket(nil)
+	tm := m.getTunnelMetrics(tunnel)
+	tm.udpPacketsOut.Add(1)
+	tm.udpBytesOut.Add(uint64(size))
+	if fallback {
+		tm.udpFallbacks.Add(1)
+	}
+	m.updateLastPacket(tm)
+}
+
+func (m *Metrics) recordTCPInbound(tunnel protocol.Tunnel, size int) {
+	m.tcpPacketsIn.Add(1)
+	m.tcpBytesIn.Add(uint64(size))
+	m.updateLastPacket(nil)
+	tm := m.getTunnelMetrics(tunnel)
+	tm.tcpPacketsIn.Add(1)
+	tm.tcpBytesIn.Add(uint64(size))
+	m.updateLastPacket(tm)
+}
+
+func (m *Metrics) recordTCPOutbound(tunnel protocol.Tunnel, size int) {
+	m.tcpPacketsOut.Add(1)
+	m.tcpBytesOut.Add(uint64(size))
+	m.updateLastPacket(nil)
+	tm := m.getTunnelMetrics(tunnel)
+	tm.tcpPacketsOut.Add(1)
+	tm.tcpBytesOut.Add(uint64(size))
+	m.updateLastPacket(tm)
+}
+
+func (m *Metrics) updateLastPacket(tm *TunnelMetrics) {
+	now := time.Now().UnixNano()
+	m.lastPacketAt.Store(now)
+	if tm != nil {
+		tm.lastPacketAt.Store(now)
+	}
+}
+
+func (m *Metrics) Snapshot() MetricsSnapshot {
+	lastPkt := m.lastPacketAt.Load()
+	snap := MetricsSnapshot{
+		StartTime:     m.startTime,
+		UDPPacketsIn:  m.udpPacketsIn.Load(),
+		UDPPacketsOut: m.udpPacketsOut.Load(),
+		UDPBytesIn:    m.udpBytesIn.Load(),
+		UDPBytesOut:   m.udpBytesOut.Load(),
+		UDPFallbacks:  m.udpFallbacks.Load(),
+		TCPPacketsIn:  m.tcpPacketsIn.Load(),
+		TCPPacketsOut: m.tcpPacketsOut.Load(),
+		TCPBytesIn:    m.tcpBytesIn.Load(),
+		TCPBytesOut:   m.tcpBytesOut.Load(),
+	}
+	if lastPkt > 0 {
+		snap.LastPacketAt = time.Unix(0, lastPkt)
+	}
+
+	m.tunnelMu.RLock()
+	snap.Tunnels = make([]TunnelMetricsSnapshot, 0, len(m.tunnels))
+	for _, tm := range m.tunnels {
+		tLast := tm.lastPacketAt.Load()
+		snap.Tunnels = append(snap.Tunnels, TunnelMetricsSnapshot{
+			TunnelName:    tm.TunnelName,
+			Protocol:      tm.Protocol,
+			ServerPort:    tm.ServerPort,
+			ClientPort:    tm.ClientPort,
+			UDPPacketsIn:  tm.udpPacketsIn.Load(),
+			UDPPacketsOut: tm.udpPacketsOut.Load(),
+			UDPBytesIn:    tm.udpBytesIn.Load(),
+			UDPBytesOut:   tm.udpBytesOut.Load(),
+			UDPFallbacks:  tm.udpFallbacks.Load(),
+			TCPPacketsIn:  tm.tcpPacketsIn.Load(),
+			TCPPacketsOut: tm.tcpPacketsOut.Load(),
+			TCPBytesIn:    tm.tcpBytesIn.Load(),
+			TCPBytesOut:   tm.tcpBytesOut.Load(),
+			LastPacketAt:  time.Unix(0, tLast),
+		})
+	}
+	m.tunnelMu.RUnlock()
+
+	return snap
+}
+
 // GetStats 获取统计信息
 func (s *Server) GetStats() Stats {
 	s.mu.RLock()
@@ -1172,6 +1391,14 @@ func (s *Server) GetStats() Stats {
 		ConnectionCount: len(s.connections),
 		TunnelCount:     len(s.tunnelListeners),
 	}
+}
+
+// GetMetrics 获取运行时指标快照
+func (s *Server) GetMetrics() MetricsSnapshot {
+	if s.metrics == nil {
+		return MetricsSnapshot{}
+	}
+	return s.metrics.Snapshot()
 }
 
 // Stats 统计信息

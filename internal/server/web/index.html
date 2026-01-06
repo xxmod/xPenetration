@@ -91,6 +91,71 @@
                     </div>
                 </div>
 
+                <div class="row mt-3">
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6 class="card-title text-muted">下行速率 (外部→内网)</h6>
+                                <p class="card-text h4">{{ formatRate(metricsRates.inboundBps) }}</p>
+                                <small class="text-muted">包速率：{{ metricsRates.packetsInRate.toFixed(1) }} pkt/s</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6 class="card-title text-muted">上行速率 (内网→外部)</h6>
+                                <p class="card-text h4">{{ formatRate(metricsRates.outboundBps) }}</p>
+                                <small class="text-muted">包速率：{{ metricsRates.packetsOutRate.toFixed(1) }} pkt/s</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6 class="card-title text-muted">UDP 回退计数</h6>
+                                <p class="card-text h4">{{ metrics.udp_fallbacks || 0 }}</p>
+                                <small class="text-muted">最近流量时间：{{ metrics.last_packet_at ? formatDate(metrics.last_packet_at) : '暂无' }}</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <h4 class="mt-4 mb-3">隧道观测</h4>
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>隧道</th>
+                                        <th>协议</th>
+                                        <th>端口</th>
+                                        <th>流量 (入/出)</th>
+                                        <th>报文 (入/出)</th>
+                                        <th>回退</th>
+                                        <th>最近流量</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="tm in metrics.tunnels || []" :key="tm.tunnel_name">
+                                        <td><strong>{{ tm.tunnel_name }}</strong></td>
+                                        <td>{{ tm.protocol.toUpperCase() }}</td>
+                                        <td>{{ tm.server_port }} → {{ tm.client_port }}</td>
+                                        <td>{{ formatBytes(getBytes(tm, 'in')) }} / {{ formatBytes(getBytes(tm, 'out')) }}</td>
+                                        <td>{{ getPackets(tm, 'in') }} / {{ getPackets(tm, 'out') }}</td>
+                                        <td>{{ getFallback(tm) }}</td>
+                                        <td>{{ tm.last_packet_at ? formatDate(tm.last_packet_at) : '暂无' }}</td>
+                                    </tr>
+                                    <tr v-if="!metrics.tunnels || metrics.tunnels.length === 0">
+                                        <td colspan="7" class="text-center text-muted">暂无数据</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
                 <h4 class="mt-4 mb-3">活跃连接列表</h4>
                 <div class="card">
                     <div class="card-body">
@@ -362,6 +427,10 @@
                 return {
                     currentView: 'dashboard',
                     stats: {},
+                    metrics: { tunnels: [] },
+                    prevMetrics: null,
+                    metricsRates: { inboundBps: 0, outboundBps: 0, packetsInRate: 0, packetsOutRate: 0 },
+                    lastMetricsAt: null,
                     connections: [],
                     config: {
                         server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null },
@@ -415,12 +484,14 @@
                 },
                 async fetchData() {
                     try {
-                        const [statsRes, connRes] = await Promise.all([
+                        const [statsRes, connRes, metricsRes] = await Promise.all([
                             axios.get('/api/stats'),
-                            axios.get('/api/connections')
+                            axios.get('/api/connections'),
+                            axios.get('/api/metrics')
                         ]);
                         this.stats = statsRes.data;
                         this.connections = connRes.data;
+                        this.applyMetrics(metricsRes.data);
                         this.serverStatus = true;
                     } catch (e) {
                         console.error('Failed to fetch data', e);
@@ -509,6 +580,38 @@
                         this.logs = [];
                     }
                 },
+                applyMetrics(newMetrics) {
+                    if (!newMetrics) return;
+                    const now = Date.now();
+                    if (this.prevMetrics && this.lastMetricsAt) {
+                        const dt = (now - this.lastMetricsAt) / 1000;
+                        if (dt > 0) {
+                            const currInBytes = (newMetrics.udp_bytes_in || 0) + (newMetrics.tcp_bytes_in || 0);
+                            const currOutBytes = (newMetrics.udp_bytes_out || 0) + (newMetrics.tcp_bytes_out || 0);
+                            const prevInBytes = (this.prevMetrics.udp_bytes_in || 0) + (this.prevMetrics.tcp_bytes_in || 0);
+                            const prevOutBytes = (this.prevMetrics.udp_bytes_out || 0) + (this.prevMetrics.tcp_bytes_out || 0);
+                            const deltaInBytes = Math.max(0, currInBytes - prevInBytes);
+                            const deltaOutBytes = Math.max(0, currOutBytes - prevOutBytes);
+
+                            const currInPkts = (newMetrics.udp_packets_in || 0) + (newMetrics.tcp_packets_in || 0);
+                            const currOutPkts = (newMetrics.udp_packets_out || 0) + (newMetrics.tcp_packets_out || 0);
+                            const prevInPkts = (this.prevMetrics.udp_packets_in || 0) + (this.prevMetrics.tcp_packets_in || 0);
+                            const prevOutPkts = (this.prevMetrics.udp_packets_out || 0) + (this.prevMetrics.tcp_packets_out || 0);
+                            const deltaInPkts = Math.max(0, currInPkts - prevInPkts);
+                            const deltaOutPkts = Math.max(0, currOutPkts - prevOutPkts);
+
+                            this.metricsRates = {
+                                inboundBps: deltaInBytes / dt,
+                                outboundBps: deltaOutBytes / dt,
+                                packetsInRate: deltaInPkts / dt,
+                                packetsOutRate: deltaOutPkts / dt,
+                            };
+                        }
+                    }
+                    this.prevMetrics = newMetrics;
+                    this.metrics = newMetrics;
+                    this.lastMetricsAt = now;
+                },
                 getLogLevelBadge(level) {
                     switch(level) {
                         case 'error': return 'bg-danger';
@@ -523,6 +626,46 @@
                         case 'warn': return 'table-warning';
                         default: return '';
                     }
+                },
+                formatBytes(bytes) {
+                    if (!bytes || bytes <= 0) return '0 B';
+                    const units = ['B', 'KB', 'MB', 'GB'];
+                    let i = 0;
+                    let val = bytes;
+                    while (val >= 1024 && i < units.length - 1) {
+                        val /= 1024;
+                        i++;
+                    }
+                    return `${val.toFixed(1)} ${units[i]}`;
+                },
+                formatRate(bps) {
+                    if (!bps || bps <= 0) return '0 bps';
+                    const units = ['bps', 'Kbps', 'Mbps', 'Gbps'];
+                    let i = 0;
+                    let val = bps * 8; // bytes/sec -> bits/sec
+                    while (val >= 1000 && i < units.length - 1) {
+                        val /= 1000;
+                        i++;
+                    }
+                    return `${val.toFixed(2)} ${units[i]}`;
+                },
+                isTCP(tm) {
+                    return tm && tm.protocol && tm.protocol.toLowerCase() === 'tcp';
+                },
+                getBytes(tm, dir) {
+                    if (this.isTCP(tm)) {
+                        return dir === 'in' ? (tm.tcp_bytes_in || 0) : (tm.tcp_bytes_out || 0);
+                    }
+                    return dir === 'in' ? (tm.udp_bytes_in || 0) : (tm.udp_bytes_out || 0);
+                },
+                getPackets(tm, dir) {
+                    if (this.isTCP(tm)) {
+                        return dir === 'in' ? (tm.tcp_packets_in || 0) : (tm.tcp_packets_out || 0);
+                    }
+                    return dir === 'in' ? (tm.udp_packets_in || 0) : (tm.udp_packets_out || 0);
+                },
+                getFallback(tm) {
+                    return this.isTCP(tm) ? '-' : (tm.udp_fallbacks || 0);
                 }
             }
         }).mount('#app')
