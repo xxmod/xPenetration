@@ -1035,3 +1035,45 @@ func (s *Server) GetLogs(limit int) []LogEntry {
 	}
 	return result
 }
+
+// HasRecentErrors 检查最近指定秒数内是否有ERROR日志
+func (s *Server) HasRecentErrors(seconds int) bool {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+
+	cutoffTime := time.Now().Add(-time.Duration(seconds) * time.Second)
+
+	// 从最新的日志开始检查（因为日志是按时间顺序存储的）
+	for i := len(s.logs) - 1; i >= 0; i-- {
+		log := s.logs[i]
+		// 如果日志时间早于截止时间，后面的更早，可以停止检查
+		if log.Time.Before(cutoffTime) {
+			break
+		}
+		// 检查是否是ERROR级别
+		if log.Level == "ERROR" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasDisconnectedClients 检查是否有已配置但未连接的客户端
+func (s *Server) HasDisconnectedClients() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// 获取配置的客户端数量
+	if s.config == nil {
+		return false
+	}
+
+	// 检查每个配置的客户端是否已连接
+	for _, configClient := range s.config.Clients {
+		// 检查该客户端是否在已连接的客户端列表中
+		if _, exists := s.clientsByName[configClient.Name]; !exists {
+			return true
+		}
+	}
+	return false
+}

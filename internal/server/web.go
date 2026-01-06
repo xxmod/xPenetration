@@ -45,6 +45,7 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
 	ws.mux.HandleFunc("/api/config", ws.handleConfig)
 	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
+	ws.mux.HandleFunc("/status/", ws.handleStatus)
 
 	// 静态文件（前端）
 	// 从 embed.FS 中获取 web 子目录
@@ -199,6 +200,28 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs := ws.server.GetLogs(limit)
 	ws.writeJSON(w, logs)
+}
+
+// handleStatus 处理状态检查请求
+func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 检查最近5分钟是否有ERROR日志
+	hasError := ws.server.HasRecentErrors(5 * 60) // 5分钟 = 300秒
+
+	// 检查是否有已配置但未连接的客户端
+	hasDisconnected := ws.server.HasDisconnectedClients()
+
+	if hasError || hasDisconnected {
+		w.WriteHeader(220)
+		w.Write([]byte("Some Services Wrong"))
+	} else {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("All Services OK"))
+	}
 }
 
 // writeJSON 写入JSON响应

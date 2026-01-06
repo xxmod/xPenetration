@@ -11,6 +11,7 @@
 - 局域网设备穿透（可穿透同一局域网内其他设备的端口，不仅限于本机）
 - 支持使用TCP封装UDP传输UDP数据包（作为备用选项，可能导致丢包）
 - Web 管理界面（查看/调整服务端配置，支持 Basic Auth 认证保护）
+- 可通过网页状态码判断服务健康状态
 - 客户端自动重连
 
 ## 快速开始
@@ -64,6 +65,17 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 ```
 
 ## 配置要点
+
+### 服务状态监控
+
+访问 `/status/` 路径可查看服务运行状态，自动检测最近5分钟内的错误日志：
+
+- 如果存在 ERROR 日志或有已配置但未连接的主机：返回状态码 **220**，显示 `Some Services Wrong`
+- 如果没有错误：返回状态码 **200**，显示 `All Services OK`
+
+示例：`http://your-server.com:7500/status/`端口取决于你的管理端口
+
+### 配置文件内容
 
 服务端配置示例见 `configs/server.example.yaml`：
 
