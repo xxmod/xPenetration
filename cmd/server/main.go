@@ -76,6 +76,9 @@ func main() {
 	// 创建服务端
 	srv := server.NewServer(cfg)
 
+	// 设置日志捕获（在启动前设置，确保所有日志都被捕获）
+	srv.SetupLogCapture()
+
 	// 启动服务端
 	if err := srv.Start(); err != nil {
 		log.Printf("Warning: Failed to start server core: %v", err)

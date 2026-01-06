@@ -502,7 +502,7 @@
                 },
                 async fetchLogs() {
                     try {
-                        const res = await axios.get('/api/logs?limit=200');
+                        const res = await axios.get('/api/logs?limit=500');
                         this.logs = res.data || [];
                     } catch (e) {
                         console.error('Failed to fetch logs', e);
