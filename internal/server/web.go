@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"xpenetration/internal/config"
@@ -83,6 +84,12 @@ func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
 // basicAuthMiddleware Basic Auth认证中间件
 func (ws *WebServer) basicAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /status/ 路径豁免认证
+		if strings.HasPrefix(r.URL.Path, "/status/") || r.URL.Path == "/status" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// 获取当前配置的认证信息
 		cfg := ws.server.GetConfig()
 		if cfg == nil || cfg.Server.WebAuth == nil || cfg.Server.WebAuth.Username == "" {
