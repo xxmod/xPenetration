@@ -423,12 +423,16 @@ func (c *Client) startNativeUDPTransport() error {
 		return fmt.Errorf("failed to create UDP connection: %v", err)
 	}
 
+	// 设置UDP缓冲区大小，减少高流量时的丢包
+	conn.SetReadBuffer(protocol.UDPReadBufferSize)
+	conn.SetWriteBuffer(protocol.UDPWriteBufferSize)
+
 	c.mu.Lock()
 	c.nativeUDPConn = conn
 	c.serverUDPAddr = udpAddr
 	c.mu.Unlock()
 
-	log.Printf("[Client] Native UDP transport connected to %s", serverUDPAddr)
+	log.Printf("[Client] Native UDP transport connected to %s (buffer: %dKB)", serverUDPAddr, protocol.UDPReadBufferSize/1024)
 
 	// 启动定期发送注册包的goroutine（每30分钟发送一次，因为IP和端口可能会变化）
 	go c.udpRegisterLoop()
@@ -439,13 +443,14 @@ func (c *Client) startNativeUDPTransport() error {
 	return nil
 }
 
-// udpRegisterLoop 定期发送UDP注册包
+// udpRegisterLoop 定期发送UDP注册包（NAT保活）
 func (c *Client) udpRegisterLoop() {
 	// 先立即发送一次注册包
 	c.sendUDPRegisterPacket()
 
-	// 每30分钟发送一次注册包
-	ticker := time.NewTicker(30 * time.Minute)
+	// 每30秒发送一次注册包，保持NAT穿透状态
+	// 大多数NAT设备的UDP映射超时时间在30秒-2分钟之间
+	ticker := time.NewTicker(protocol.UDPKeepaliveInterval)
 	defer ticker.Stop()
 
 	for {

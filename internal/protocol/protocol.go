@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
 
 // 消息类型定义
@@ -35,6 +36,19 @@ const (
 // 当UDP数据包超过此大小时，自动回退到TCP传输
 const (
 	UDPSafeMTU = 1400 // 安全的UDP MTU大小
+)
+
+// UDP缓冲区常量
+const (
+	UDPReadBufferSize  = 4 * 1024 * 1024 // UDP接收缓冲区大小 4MB
+	UDPWriteBufferSize = 4 * 1024 * 1024 // UDP发送缓冲区大小 4MB
+)
+
+// UDP NAT保活常量
+const (
+	UDPKeepaliveInterval = 30 * time.Second // UDP NAT保活间隔（30秒）
+	UDPRemoteAddrExpiry  = 5 * time.Minute  // UDP远程地址过期时间（5分钟）
+	UDPCleanupInterval   = 1 * time.Minute  // UDP地址清理间隔（1分钟）
 )
 
 // 原生UDP数据包类型

@@ -27,6 +27,7 @@ type Server struct {
 	mu              sync.RWMutex
 	logMu           sync.RWMutex // 日志专用锁
 	running         bool
+	stopChan        chan struct{} // 停止信号通道
 }
 
 // LogEntry 日志条目
@@ -45,8 +46,15 @@ type UDPListener struct {
 	Tunnel     protocol.Tunnel
 	ClientName string
 	// 保存远程地址到响应通道的映射，用于UDP响应
-	remoteAddrs map[string]*net.UDPAddr
+	remoteAddrs map[string]*UDPRemoteAddrEntry
 	mu          sync.RWMutex
+	stopCleanup chan struct{}
+}
+
+// UDPRemoteAddrEntry UDP远程地址条目（包含时间戳）
+type UDPRemoteAddrEntry struct {
+	Addr     *net.UDPAddr
+	LastSeen time.Time
 }
 
 // ClientConn 客户端连接信息
@@ -84,6 +92,7 @@ func NewServer(cfg *config.ServerConfig) *Server {
 		connections:     make(map[string]*ProxyConn),
 		clientUDPAddrs:  make(map[string]*net.UDPAddr),
 		logs:            make([]LogEntry, 0),
+		stopChan:        make(chan struct{}),
 	}
 }
 
@@ -143,11 +152,15 @@ func (s *Server) startNativeUDPListener() error {
 		return err
 	}
 
+	// 设置UDP缓冲区大小，减少高流量时的丢包
+	conn.SetReadBuffer(protocol.UDPReadBufferSize)
+	conn.SetWriteBuffer(protocol.UDPWriteBufferSize)
+
 	s.mu.Lock()
 	s.nativeUDPConn = conn
 	s.mu.Unlock()
 
-	log.Printf("[Server] Native UDP transport listening on %s", addr)
+	log.Printf("[Server] Native UDP transport listening on %s (buffer: %dKB)", addr, protocol.UDPReadBufferSize/1024)
 
 	go s.handleNativeUDPTransport()
 	return nil
@@ -170,64 +183,84 @@ func (s *Server) handleNativeUDPTransport() {
 			continue
 		}
 
-		// 检查数据包类型
-		pktType := buf[0]
+		// 复制数据以便并发处理
+		pktData := make([]byte, n)
+		copy(pktData, buf[:n])
+		addrCopy := &net.UDPAddr{
+			IP:   make(net.IP, len(clientUDPAddr.IP)),
+			Port: clientUDPAddr.Port,
+			Zone: clientUDPAddr.Zone,
+		}
+		copy(addrCopy.IP, clientUDPAddr.IP)
 
-		if pktType == protocol.NativeUDPTypeRegister {
-			// 处理注册包
-			regPkt, err := protocol.DecodeNativeUDPRegisterPacket(buf[:n])
-			if err != nil {
-				log.Printf("[Server] Failed to decode UDP register packet: %v", err)
-				continue
-			}
+		// 并发处理数据包
+		go s.processNativeUDPPacket(pktData, addrCopy)
+	}
+}
 
-			// 保存客户端的UDP地址
-			s.mu.Lock()
-			s.clientUDPAddrs[regPkt.ClientName] = clientUDPAddr
-			s.mu.Unlock()
+// processNativeUDPPacket 处理单个原生UDP数据包
+func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr) {
+	if len(data) < 1 {
+		return
+	}
 
-			log.Printf("[Server] Registered UDP address for client %s: %s", regPkt.ClientName, clientUDPAddr.String())
-			continue
+	// 检查数据包类型
+	pktType := data[0]
+
+	if pktType == protocol.NativeUDPTypeRegister {
+		// 处理注册包
+		regPkt, err := protocol.DecodeNativeUDPRegisterPacket(data)
+		if err != nil {
+			log.Printf("[Server] Failed to decode UDP register packet: %v", err)
+			return
 		}
 
-		if pktType == protocol.NativeUDPTypeData {
-			// 处理数据包
-			pkt, err := protocol.DecodeNativeUDPDataPacket(buf[:n])
-			if err != nil {
-				log.Printf("[Server] Failed to decode native UDP data packet: %v", err)
-				continue
-			}
+		// 保存客户端的UDP地址
+		s.mu.Lock()
+		s.clientUDPAddrs[regPkt.ClientName] = clientUDPAddr
+		s.mu.Unlock()
 
-			// 查找对应的UDP监听器
-			s.mu.RLock()
-			udpListener, exists := s.udpListeners[pkt.ServerPort]
-			s.mu.RUnlock()
+		log.Printf("[Server] Registered UDP address for client %s: %s", regPkt.ClientName, clientUDPAddr.String())
+		return
+	}
 
-			if !exists {
-				log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
-				continue
-			}
+	if pktType == protocol.NativeUDPTypeData {
+		// 处理数据包
+		pkt, err := protocol.DecodeNativeUDPDataPacket(data)
+		if err != nil {
+			log.Printf("[Server] Failed to decode native UDP data packet: %v", err)
+			return
+		}
 
-			// 更新客户端的UDP地址（用于发送响应）
-			s.mu.Lock()
-			s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
-			s.mu.Unlock()
+		// 查找对应的UDP监听器
+		s.mu.RLock()
+		udpListener, exists := s.udpListeners[pkt.ServerPort]
+		s.mu.RUnlock()
 
-			// 查找原始请求的远程地址
-			udpListener.mu.RLock()
-			remoteAddr, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
-			udpListener.mu.RUnlock()
+		if !exists {
+			log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
+			return
+		}
 
-			if !exists {
-				log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
-				continue
-			}
+		// 更新客户端的UDP地址（用于发送响应）
+		s.mu.Lock()
+		s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
+		s.mu.Unlock()
 
-			// 发送响应给外部客户端
-			_, err = udpListener.Conn.WriteToUDP(pkt.Data, remoteAddr)
-			if err != nil {
-				log.Printf("[Server] Failed to send UDP response to external client: %v", err)
-			}
+		// 查找原始请求的远程地址
+		udpListener.mu.RLock()
+		entry, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
+		udpListener.mu.RUnlock()
+
+		if !exists {
+			log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
+			return
+		}
+
+		// 发送响应给外部客户端
+		_, err = udpListener.Conn.WriteToUDP(pkt.Data, entry.Addr)
+		if err != nil {
+			log.Printf("[Server] Failed to send UDP response to external client: %v", err)
 		}
 	}
 }
@@ -277,21 +310,52 @@ func (s *Server) startUDPTunnelListener(tunnel protocol.Tunnel, clientName strin
 		return err
 	}
 
+	// 设置UDP缓冲区大小，减少高流量时的丢包
+	conn.SetReadBuffer(protocol.UDPReadBufferSize)
+	conn.SetWriteBuffer(protocol.UDPWriteBufferSize)
+
 	udpListener := &UDPListener{
 		Conn:        conn,
 		Tunnel:      tunnel,
 		ClientName:  clientName,
-		remoteAddrs: make(map[string]*net.UDPAddr),
+		remoteAddrs: make(map[string]*UDPRemoteAddrEntry),
+		stopCleanup: make(chan struct{}),
 	}
 
 	s.udpListeners[tunnel.ServerPort] = udpListener
 
 	udpMode := protocol.GetUDPMode(tunnel.UDPMode)
-	log.Printf("[Server] UDP Tunnel %s listening on port %d -> client %s port %d (mode: %s)",
-		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort, udpMode)
+	log.Printf("[Server] UDP Tunnel %s listening on port %d -> client %s port %d (mode: %s, buffer: %dKB)",
+		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort, udpMode, protocol.UDPReadBufferSize/1024)
 
+	// 启动远程地址清理线程
+	go s.cleanupRemoteAddrs(udpListener)
 	go s.handleUDPTunnel(udpListener)
 	return nil
+}
+
+// cleanupRemoteAddrs 定期清理过期的远程地址映射
+func (s *Server) cleanupRemoteAddrs(udpListener *UDPListener) {
+	ticker := time.NewTicker(protocol.UDPCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			udpListener.mu.Lock()
+			for addr, entry := range udpListener.remoteAddrs {
+				if now.Sub(entry.LastSeen) > protocol.UDPRemoteAddrExpiry {
+					delete(udpListener.remoteAddrs, addr)
+				}
+			}
+			udpListener.mu.Unlock()
+		case <-udpListener.stopCleanup:
+			return
+		case <-s.stopChan:
+			return
+		}
+	}
 }
 
 // handleUDPTunnel 处理UDP隧道数据
@@ -308,66 +372,85 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 			continue
 		}
 
-		// 保存远程地址用于响应
-		remoteAddrStr := remoteAddr.String()
-		udpListener.mu.Lock()
-		udpListener.remoteAddrs[remoteAddrStr] = remoteAddr
-		udpListener.mu.Unlock()
-
-		// 查找客户端
-		s.mu.RLock()
-		client, exists := s.clientsByName[udpListener.ClientName]
-		clientUDPAddr := s.clientUDPAddrs[udpListener.ClientName]
-		s.mu.RUnlock()
-
-		if !exists {
-			log.Printf("[Server] UDP: Client not connected: %s", udpListener.ClientName)
-			continue
+		// 复制数据以便并发处理
+		pktData := make([]byte, n)
+		copy(pktData, buf[:n])
+		addrCopy := &net.UDPAddr{
+			IP:   make(net.IP, len(remoteAddr.IP)),
+			Port: remoteAddr.Port,
+			Zone: remoteAddr.Zone,
 		}
+		copy(addrCopy.IP, remoteAddr.IP)
 
-		// 根据udp_mode选择传输方式
-		// 计算编码后的数据包大小，检查是否超过MTU
-		pktData := protocol.EncodeNativeUDPDataPacket(
-			udpListener.Tunnel.ServerPort,
-			udpListener.Tunnel.ClientPort,
-			remoteAddrStr,
-			buf[:n],
-		)
-		useNativeUDP := udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil
-		// 如果数据包超过安全MTU大小，自动回退到TCP传输
-		if useNativeUDP && len(pktData) > protocol.UDPSafeMTU {
+		// 并发处理数据包
+		go s.processUDPTunnelPacket(udpListener, pktData, addrCopy, udpMode)
+	}
+}
+
+// processUDPTunnelPacket 处理单个UDP隧道数据包
+func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, remoteAddr *net.UDPAddr, udpMode string) {
+	// 保存远程地址用于响应（带时间戳）
+	remoteAddrStr := remoteAddr.String()
+	udpListener.mu.Lock()
+	udpListener.remoteAddrs[remoteAddrStr] = &UDPRemoteAddrEntry{
+		Addr:     remoteAddr,
+		LastSeen: time.Now(),
+	}
+	udpListener.mu.Unlock()
+
+	// 查找客户端
+	s.mu.RLock()
+	client, exists := s.clientsByName[udpListener.ClientName]
+	clientUDPAddr := s.clientUDPAddrs[udpListener.ClientName]
+	s.mu.RUnlock()
+
+	if !exists {
+		log.Printf("[Server] UDP: Client not connected: %s", udpListener.ClientName)
+		return
+	}
+
+	// 根据udp_mode选择传输方式
+	// 计算编码后的数据包大小，检查是否超过MTU
+	pktData := protocol.EncodeNativeUDPDataPacket(
+		udpListener.Tunnel.ServerPort,
+		udpListener.Tunnel.ClientPort,
+		remoteAddrStr,
+		data,
+	)
+	useNativeUDP := udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil
+	// 如果数据包超过安全MTU大小，自动回退到TCP传输
+	if useNativeUDP && len(pktData) > protocol.UDPSafeMTU {
+		useNativeUDP = false
+	}
+
+	if useNativeUDP {
+		// 原生UDP传输：直接通过UDP发送给客户端（使用带类型前缀的数据包）
+		_, err := s.nativeUDPConn.WriteToUDP(pktData, clientUDPAddr)
+		if err != nil {
+			// 发送失败时也回退到TCP
 			useNativeUDP = false
 		}
+	}
 
-		if useNativeUDP {
-			// 原生UDP传输：直接通过UDP发送给客户端（使用带类型前缀的数据包）
-			_, err = s.nativeUDPConn.WriteToUDP(pktData, clientUDPAddr)
-			if err != nil {
-				// 发送失败时也回退到TCP
-				useNativeUDP = false
-			}
+	if !useNativeUDP {
+		// TCP封装传输（备用方法或MTU超限回退）：通过TCP控制通道发送UDP数据
+		msg, err := protocol.NewUDPDataMessage(
+			udpListener.Tunnel.Name,
+			udpListener.Tunnel.ClientPort,
+			remoteAddrStr,
+			data,
+		)
+		if err != nil {
+			log.Printf("[Server] Failed to create UDP data message: %v", err)
+			return
 		}
 
-		if !useNativeUDP {
-			// TCP封装传输（备用方法或MTU超限回退）：通过TCP控制通道发送UDP数据
-			msg, err := protocol.NewUDPDataMessage(
-				udpListener.Tunnel.Name,
-				udpListener.Tunnel.ClientPort,
-				remoteAddrStr,
-				buf[:n],
-			)
-			if err != nil {
-				log.Printf("[Server] Failed to create UDP data message: %v", err)
-				continue
-			}
+		client.mu.Lock()
+		err = protocol.SendMessage(client.Conn, msg)
+		client.mu.Unlock()
 
-			client.mu.Lock()
-			err = protocol.SendMessage(client.Conn, msg)
-			client.mu.Unlock()
-
-			if err != nil {
-				log.Printf("[Server] Failed to send UDP data to client: %v", err)
-			}
+		if err != nil {
+			log.Printf("[Server] Failed to send UDP data to client: %v", err)
 		}
 	}
 }
@@ -398,7 +481,7 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 
 	// 获取远程地址
 	udpListener.mu.RLock()
-	remoteAddr, exists := udpListener.remoteAddrs[udm.RemoteAddr]
+	entry, exists := udpListener.remoteAddrs[udm.RemoteAddr]
 	udpListener.mu.RUnlock()
 
 	if !exists {
@@ -407,7 +490,7 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 	}
 
 	// 发送UDP响应
-	_, err = udpListener.Conn.WriteToUDP(udm.Data, remoteAddr)
+	_, err = udpListener.Conn.WriteToUDP(udm.Data, entry.Addr)
 	if err != nil {
 		log.Printf("[Server] Failed to send UDP response: %v", err)
 	}
@@ -849,6 +932,14 @@ func (s *Server) Reload(newConfig *config.ServerConfig) error {
 func (s *Server) Stop() {
 	s.running = false
 
+	// 发送停止信号
+	select {
+	case <-s.stopChan:
+		// 已经关闭
+	default:
+		close(s.stopChan)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -875,8 +966,14 @@ func (s *Server) Stop() {
 	// 清空监听器map
 	s.tunnelListeners = make(map[int]net.Listener)
 
-	// 关闭所有UDP监听器
+	// 关闭所有UDP监听器（同时会停止清理goroutine）
 	for _, udpListener := range s.udpListeners {
+		// 发送停止清理信号
+		select {
+		case <-udpListener.stopCleanup:
+		default:
+			close(udpListener.stopCleanup)
+		}
 		udpListener.Conn.Close()
 	}
 	s.udpListeners = make(map[int]*UDPListener)
@@ -895,6 +992,9 @@ func (s *Server) Stop() {
 	}
 	// 清空连接map
 	s.connections = make(map[string]*ProxyConn)
+
+	// 重新创建stopChan用于下次启动
+	s.stopChan = make(chan struct{})
 }
 
 // GetClients 获取所有客户端信息（用于Web API）
