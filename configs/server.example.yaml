@@ -11,6 +11,12 @@ server:
   web_port: 7500
   # 全局密钥（客户端验证用）
   secret_key: "your-secret-key-change-me"
+  # Web管理界面认证（Basic Auth，可选）
+  # 如果配置了用户名和密码，访问管理界面时需要认证
+  # 留空或删除此项则不启用认证
+  # web_auth:
+  #   username: "admin"
+  #   password: "your-password"
 
 # 客户端配置列表
 # 每个客户端可以配置专属密钥和分配的隧道

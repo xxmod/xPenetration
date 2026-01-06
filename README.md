@@ -10,7 +10,7 @@
 - TCP/UDP 隧道（在服务端映射端口，对外提供访问）
 - 局域网设备穿透（可穿透同一局域网内其他设备的端口，不仅限于本机）
 - 支持使用TCP封装UDP传输UDP数据包（作为备用选项，可能导致丢包）
-- Web 管理界面（查看/调整服务端配置）
+- Web 管理界面（查看/调整服务端配置，支持 Basic Auth 认证保护）
 - 客户端自动重连
 
 ## 快速开始
@@ -70,6 +70,7 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 - `server.listen_addr` / `server.control_port`：客户端连接的控制通道监听地址与端口
 - `server.web_port`：Web 管理界面端口
 - `server.secret_key`：全局密钥
+- `server.web_auth`：（可选）Web 管理界面 Basic Auth 认证，配置 `username` 和 `password` 后访问管理界面需要登录
 - `clients[]`：按客户端名称分配隧道（可为单个客户端设置独立 `secret_key`）
 - `clients[].tunnels[]`：
   - `client_port`：客户端本地服务端口

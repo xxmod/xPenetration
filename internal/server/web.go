@@ -50,7 +50,7 @@ func (ws *WebServer) setupRoutes() {
 	if err != nil {
 		log.Fatalf("Failed to create sub FS: %v", err)
 	}
-	
+
 	fileServer := http.FileServer(http.FS(subFS))
 	ws.mux.Handle("/", fileServer)
 }
@@ -58,7 +58,7 @@ func (ws *WebServer) setupRoutes() {
 // Start 启动Web服务器
 func (ws *WebServer) Start() error {
 	log.Printf("[WebServer] Starting on %s", ws.addr)
-	return http.ListenAndServe(ws.addr, ws.corsMiddleware(ws.mux))
+	return http.ListenAndServe(ws.addr, ws.basicAuthMiddleware(ws.corsMiddleware(ws.mux)))
 }
 
 // corsMiddleware CORS中间件
@@ -70,6 +70,28 @@ func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// basicAuthMiddleware Basic Auth认证中间件
+func (ws *WebServer) basicAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 获取当前配置的认证信息
+		cfg := ws.server.GetConfig()
+		if cfg == nil || cfg.Server.WebAuth == nil || cfg.Server.WebAuth.Username == "" {
+			// 未配置认证，直接放行
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != cfg.Server.WebAuth.Username || pass != cfg.Server.WebAuth.Password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="xPenetration Admin"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 

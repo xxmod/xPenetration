@@ -239,6 +239,21 @@
                             </div>
                             
                             <hr>
+                            <h5 class="mb-3"><i class="bi bi-shield-lock me-2"></i>Web管理界面认证 (Basic Auth)</h5>
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label">用户名</label>
+                                    <input type="text" class="form-control" v-model="webAuthUsername" placeholder="留空则不启用认证">
+                                    <div class="form-text">设置后访问管理界面需要输入账号密码</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">密码</label>
+                                    <input type="password" class="form-control" v-model="webAuthPassword" placeholder="留空则不启用认证">
+                                    <div class="form-text">建议使用强密码保护管理界面</div>
+                                </div>
+                            </div>
+                            
+                            <hr>
                             
                             <div class="mb-3">
                                 <label class="form-label">日志级别</label>
@@ -276,10 +291,12 @@
                     stats: {},
                     connections: [],
                     config: {
-                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '' },
+                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null },
                         clients: [],
                         log: { level: 'info', output: 'stdout' }
                     },
+                    webAuthUsername: '',
+                    webAuthPassword: '',
                     serverStatus: true,
                     saving: false,
                     timer: null
@@ -313,6 +330,14 @@
                         const res = await axios.get('/api/config');
                         this.config = res.data;
                         if (!this.config.clients) this.config.clients = [];
+                        // 加载 web_auth 配置
+                        if (this.config.server.web_auth) {
+                            this.webAuthUsername = this.config.server.web_auth.username || '';
+                            this.webAuthPassword = this.config.server.web_auth.password || '';
+                        } else {
+                            this.webAuthUsername = '';
+                            this.webAuthPassword = '';
+                        }
                     } catch (e) {
                         console.error('Failed to fetch config', e);
                         alert('无法加载配置');
@@ -321,6 +346,15 @@
                 async saveConfig() {
                     this.saving = true;
                     try {
+                        // 保存前处理 web_auth
+                        if (this.webAuthUsername && this.webAuthPassword) {
+                            this.config.server.web_auth = {
+                                username: this.webAuthUsername,
+                                password: this.webAuthPassword
+                            };
+                        } else {
+                            this.config.server.web_auth = null;
+                        }
                         await axios.post('/api/config', this.config);
                         alert('配置已保存，服务正在重启...');
                         setTimeout(() => {

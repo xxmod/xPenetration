@@ -17,11 +17,18 @@ type ServerConfig struct {
 
 // ServerSettings 服务端设置
 type ServerSettings struct {
-	ListenAddr  string `yaml:"listen_addr" json:"listen_addr"`   // 监听地址
-	ControlPort int    `yaml:"control_port" json:"control_port"` // 控制端口
-	UDPPort     int    `yaml:"udp_port" json:"udp_port"`         // UDP数据传输端口（用于原生UDP隧道）
-	WebPort     int    `yaml:"web_port" json:"web_port"`         // Web管理端口
-	SecretKey   string `yaml:"secret_key" json:"secret_key"`     // 全局密钥
+	ListenAddr  string   `yaml:"listen_addr" json:"listen_addr"`   // 监听地址
+	ControlPort int      `yaml:"control_port" json:"control_port"` // 控制端口
+	UDPPort     int      `yaml:"udp_port" json:"udp_port"`         // UDP数据传输端口（用于原生UDP隧道）
+	WebPort     int      `yaml:"web_port" json:"web_port"`         // Web管理端口
+	SecretKey   string   `yaml:"secret_key" json:"secret_key"`     // 全局密钥
+	WebAuth     *WebAuth `yaml:"web_auth" json:"web_auth"`         // Web管理界面Basic Auth（可选）
+}
+
+// WebAuth Web管理界面认证配置
+type WebAuth struct {
+	Username string `yaml:"username" json:"username"` // 用户名
+	Password string `yaml:"password" json:"password"` // 密码
 }
 
 // ClientSettings 客户端配置（服务端侧）
