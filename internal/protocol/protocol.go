@@ -29,6 +29,13 @@ const (
 	UDPModeTCP    = "tcp"    // 通过TCP隧道传输UDP（备用方法）
 )
 
+// UDP MTU常量
+// 考虑到IP头(20-60字节)和UDP头(8字节)，安全的MTU值设为1400
+// 当UDP数据包超过此大小时，自动回退到TCP传输
+const (
+	UDPSafeMTU = 1400 // 安全的UDP MTU大小
+)
+
 // 原生UDP数据包类型
 const (
 	NativeUDPTypeRegister uint8 = 0 // 注册包（客户端发送给服务端，告知UDP地址）

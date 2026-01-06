@@ -667,22 +667,34 @@ func (c *Client) forwardUDPFromLocal(connInfo *UDPConnInfo) {
 		}
 
 		// 根据UDP模式选择发送方式
-		if udpMode == protocol.UDPModeNative && c.nativeUDPConn != nil && c.serverUDPAddr != nil {
+		// 计算编码后的数据包大小，检查是否超过MTU
+		pktData := protocol.EncodeNativeUDPDataPacket(
+			serverPort,
+			connInfo.ClientPort,
+			remoteAddr,
+			buf[:n],
+		)
+		useNativeUDP := udpMode == protocol.UDPModeNative && c.nativeUDPConn != nil && c.serverUDPAddr != nil
+		// 如果数据包超过安全MTU大小，自动回退到TCP传输
+		if useNativeUDP && len(pktData) > protocol.UDPSafeMTU {
+			log.Printf("[Client] UDP packet size %d exceeds MTU %d, falling back to TCP for this packet", len(pktData), protocol.UDPSafeMTU)
+			useNativeUDP = false
+		}
+
+		if useNativeUDP {
 			// 原生UDP传输：直接通过UDP发送给服务端（使用带类型前缀的数据包）
-			pktData := protocol.EncodeNativeUDPDataPacket(
-				serverPort,
-				connInfo.ClientPort,
-				remoteAddr,
-				buf[:n],
-			)
 			c.mu.RLock()
 			_, err = c.nativeUDPConn.WriteToUDP(pktData, c.serverUDPAddr)
 			c.mu.RUnlock()
 			if err != nil {
-				log.Printf("[Client] Failed to send native UDP response to server: %v", err)
+				log.Printf("[Client] Failed to send native UDP response to server: %v, falling back to TCP", err)
+				// 发送失败时也回退到TCP
+				useNativeUDP = false
 			}
-		} else {
-			// TCP封装传输（备用方法）：通过TCP控制通道发送
+		}
+
+		if !useNativeUDP {
+			// TCP封装传输（备用方法或MTU超限回退）：通过TCP控制通道发送
 			msg, err := protocol.NewUDPDataMessage(connInfo.TunnelName, connInfo.ClientPort, remoteAddr, buf[:n])
 			if err != nil {
 				log.Printf("[Client] Failed to create UDP response message: %v", err)
