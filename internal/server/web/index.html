@@ -28,17 +28,22 @@
             <hr>
             <ul class="nav nav-pills flex-column mb-auto">
                 <li class="nav-item">
-                    <a class="nav-link" :class="{ active: currentView === 'dashboard' }" @click="currentView = 'dashboard'">
+                    <a class="nav-link" :class="{ active: currentView === 'dashboard' }" @click="switchView('dashboard')">
                         <i class="bi bi-speedometer2 me-2"></i> 仪表盘
                     </a>
                 </li>
                 <li>
-                    <a class="nav-link" :class="{ active: currentView === 'clients' }" @click="currentView = 'clients'">
+                    <a class="nav-link" :class="{ active: currentView === 'clients' }" @click="switchView('clients')">
                         <i class="bi bi-people me-2"></i> 客户端管理
                     </a>
                 </li>
                 <li>
-                    <a class="nav-link" :class="{ active: currentView === 'settings' }" @click="currentView = 'settings'">
+                    <a class="nav-link" :class="{ active: currentView === 'logs' }" @click="switchView('logs')">
+                        <i class="bi bi-journal-text me-2"></i> 系统日志
+                    </a>
+                </li>
+                <li>
+                    <a class="nav-link" :class="{ active: currentView === 'settings' }" @click="switchView('settings')">
                         <i class="bi bi-gear me-2"></i> 服务端设置
                     </a>
                 </li>
@@ -276,6 +281,74 @@
                 </div>
             </div>
 
+            <!-- Logs View -->
+            <div v-if="currentView === 'logs'">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h2><i class="bi bi-journal-text me-2"></i>系统日志</h2>
+                    <div>
+                        <select class="form-select d-inline-block me-2" style="width: auto;" v-model="logFilter.level">
+                            <option value="">全部级别</option>
+                            <option value="error">Error</option>
+                            <option value="warn">Warning</option>
+                            <option value="info">Info</option>
+                        </select>
+                        <select class="form-select d-inline-block me-2" style="width: auto;" v-model="logFilter.source">
+                            <option value="">全部来源</option>
+                            <option value="server">服务端</option>
+                            <option value="client">客户端</option>
+                        </select>
+                        <button class="btn btn-outline-primary" @click="fetchLogs">
+                            <i class="bi bi-arrow-clockwise"></i> 刷新
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover table-striped mb-0">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th style="width: 180px;">时间</th>
+                                        <th style="width: 80px;">级别</th>
+                                        <th style="width: 80px;">来源</th>
+                                        <th style="width: 120px;">客户端</th>
+                                        <th style="width: 120px;">类型</th>
+                                        <th>消息</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="log in filteredLogs" :key="log.time" :class="getLogRowClass(log.level)">
+                                        <td><small>{{ formatDate(log.time) }}</small></td>
+                                        <td>
+                                            <span class="badge" :class="getLogLevelBadge(log.level)">{{ log.level.toUpperCase() }}</span>
+                                        </td>
+                                        <td>
+                                            <span class="badge" :class="log.source === 'client' ? 'bg-info' : 'bg-secondary'">
+                                                {{ log.source === 'client' ? '客户端' : '服务端' }}
+                                            </span>
+                                        </td>
+                                        <td>{{ log.client_name || '-' }}</td>
+                                        <td><code>{{ log.type }}</code></td>
+                                        <td>{{ log.message }}</td>
+                                    </tr>
+                                    <tr v-if="filteredLogs.length === 0">
+                                        <td colspan="6" class="text-center text-muted py-4">
+                                            <i class="bi bi-inbox fs-1 d-block mb-2"></i>
+                                            暂无日志记录
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-3 text-muted">
+                    <small>显示最近 {{ logs.length }} 条日志（筛选后 {{ filteredLogs.length }} 条）</small>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -299,7 +372,22 @@
                     webAuthPassword: '',
                     serverStatus: true,
                     saving: false,
-                    timer: null
+                    timer: null,
+                    logTimer: null,
+                    logs: [],
+                    logFilter: {
+                        level: '',
+                        source: ''
+                    }
+                }
+            },
+            computed: {
+                filteredLogs() {
+                    return this.logs.filter(log => {
+                        if (this.logFilter.level && log.level !== this.logFilter.level) return false;
+                        if (this.logFilter.source && log.source !== this.logFilter.source) return false;
+                        return true;
+                    });
                 }
             },
             mounted() {
@@ -309,8 +397,22 @@
             },
             beforeUnmount() {
                 if (this.timer) clearInterval(this.timer);
+                if (this.logTimer) clearInterval(this.logTimer);
             },
             methods: {
+                switchView(view) {
+                    this.currentView = view;
+                    // 停止日志定时器
+                    if (this.logTimer) {
+                        clearInterval(this.logTimer);
+                        this.logTimer = null;
+                    }
+                    // 如果切换到日志页面，启动自动刷新
+                    if (view === 'logs') {
+                        this.fetchLogs();
+                        this.logTimer = setInterval(this.fetchLogs, 2000);
+                    }
+                },
                 async fetchData() {
                     try {
                         const [statsRes, connRes] = await Promise.all([
@@ -397,6 +499,30 @@
                 },
                 formatDate(dateStr) {
                     return new Date(dateStr).toLocaleString();
+                },
+                async fetchLogs() {
+                    try {
+                        const res = await axios.get('/api/logs?limit=200');
+                        this.logs = res.data || [];
+                    } catch (e) {
+                        console.error('Failed to fetch logs', e);
+                        this.logs = [];
+                    }
+                },
+                getLogLevelBadge(level) {
+                    switch(level) {
+                        case 'error': return 'bg-danger';
+                        case 'warn': return 'bg-warning text-dark';
+                        case 'info': return 'bg-info';
+                        default: return 'bg-secondary';
+                    }
+                },
+                getLogRowClass(level) {
+                    switch(level) {
+                        case 'error': return 'table-danger';
+                        case 'warn': return 'table-warning';
+                        default: return '';
+                    }
                 }
             }
         }).mount('#app')

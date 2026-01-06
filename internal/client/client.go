@@ -269,8 +269,10 @@ func (c *Client) handleNewConnection(msg *protocol.Message) {
 	localAddr := fmt.Sprintf("%s:%d", targetIP, nc.ClientPort)
 	localConn, err := net.DialTimeout("tcp", localAddr, 5*time.Second)
 	if err != nil {
-		log.Printf("[Client] Failed to connect to local service %s: %v", localAddr, err)
+		errMsg := fmt.Sprintf("Failed to connect to local service %s: %v", localAddr, err)
+		log.Printf("[Client] %s", errMsg)
 		c.sendConnReady(nc.ConnID, false, err.Error())
+		c.ReportError("connection", errMsg)
 		return
 	}
 
@@ -370,8 +372,10 @@ func (c *Client) handleData(msg *protocol.Message) {
 	// 转发数据到本地连接
 	_, err = localConn.Write(dm.Data)
 	if err != nil {
-		log.Printf("[Client] Failed to write to local connection: %v", err)
+		errMsg := fmt.Sprintf("Failed to write to local connection: %v", err)
+		log.Printf("[Client] %s", errMsg)
 		localConn.Close()
+		c.ReportError("data_forward", errMsg)
 	}
 }
 
@@ -594,14 +598,18 @@ func (c *Client) handleUDPData(msg *protocol.Message) {
 			udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
 			if err != nil {
 				c.udpMu.Unlock()
-				log.Printf("[Client] Failed to resolve UDP address %s: %v", localAddr, err)
+				errMsg := fmt.Sprintf("Failed to resolve UDP address %s: %v", localAddr, err)
+				log.Printf("[Client] %s", errMsg)
+				c.ReportError("udp_resolve", errMsg)
 				return
 			}
 
 			localConn, err := net.DialUDP("udp", nil, udpAddr)
 			if err != nil {
 				c.udpMu.Unlock()
-				log.Printf("[Client] Failed to connect to local UDP service %s: %v", localAddr, err)
+				errMsg := fmt.Sprintf("Failed to connect to local UDP service %s: %v", localAddr, err)
+				log.Printf("[Client] %s", errMsg)
+				c.ReportError("udp_connection", errMsg)
 				return
 			}
 
@@ -764,4 +772,31 @@ func (c *Client) GetTunnels() []protocol.Tunnel {
 // GetClientID 获取客户端ID
 func (c *Client) GetClientID() string {
 	return c.clientID
+}
+
+// ReportError 上报错误到服务端
+func (c *Client) ReportError(errorType, message string) {
+	if !c.connected || c.conn == nil {
+		return
+	}
+
+	msg, err := protocol.NewClientErrorReport(
+		c.config.Client.ClientName,
+		errorType,
+		message,
+		time.Now().Unix(),
+	)
+	if err != nil {
+		log.Printf("[Client] Failed to create error report: %v", err)
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		if err := protocol.SendMessage(c.conn, msg); err != nil {
+			log.Printf("[Client] Failed to send error report: %v", err)
+		}
+	}
 }

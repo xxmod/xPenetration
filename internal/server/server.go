@@ -23,8 +23,20 @@ type Server struct {
 	controlListener net.Listener            // 控制端口监听器
 	nativeUDPConn   *net.UDPConn            // 原生UDP传输连接（用于与客户端之间的UDP数据传输）
 	clientUDPAddrs  map[string]*net.UDPAddr // clientName -> client UDP address
+	logs            []LogEntry              // 日志记录
 	mu              sync.RWMutex
+	logMu           sync.RWMutex // 日志专用锁
 	running         bool
+}
+
+// LogEntry 日志条目
+type LogEntry struct {
+	Time       time.Time `json:"time"`
+	Level      string    `json:"level"`
+	Source     string    `json:"source"`      // 来源: server/client
+	ClientName string    `json:"client_name"` // 客户端名称（如果来自客户端）
+	Type       string    `json:"type"`        // 日志类型
+	Message    string    `json:"message"`
 }
 
 // UDPListener UDP监听器信息
@@ -71,6 +83,7 @@ func NewServer(cfg *config.ServerConfig) *Server {
 		udpListeners:    make(map[int]*UDPListener),
 		connections:     make(map[string]*ProxyConn),
 		clientUDPAddrs:  make(map[string]*net.UDPAddr),
+		logs:            make([]LogEntry, 0),
 	}
 }
 
@@ -323,7 +336,6 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 		useNativeUDP := udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil
 		// 如果数据包超过安全MTU大小，自动回退到TCP传输
 		if useNativeUDP && len(pktData) > protocol.UDPSafeMTU {
-			log.Printf("[Server] UDP packet size %d exceeds MTU %d, falling back to TCP for this packet", len(pktData), protocol.UDPSafeMTU)
 			useNativeUDP = false
 		}
 
@@ -331,7 +343,6 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 			// 原生UDP传输：直接通过UDP发送给客户端（使用带类型前缀的数据包）
 			_, err = s.nativeUDPConn.WriteToUDP(pktData, clientUDPAddr)
 			if err != nil {
-				log.Printf("[Server] Failed to send native UDP data to client: %v, falling back to TCP", err)
 				// 发送失败时也回退到TCP
 				useNativeUDP = false
 			}
@@ -578,6 +589,8 @@ func (s *Server) handleClientMessages(client *ClientConn) {
 			s.handleDisconnectFromClient(client, msg)
 		case protocol.MsgTypeUDPData:
 			s.handleUDPDataFromClient(client, msg)
+		case protocol.MsgTypeClientError:
+			s.handleClientError(client, msg)
 		default:
 			log.Printf("[Server] Unknown message type from client %s: %d", client.Name, msg.Type)
 		}
@@ -965,4 +978,60 @@ type Stats struct {
 func (s Stats) ToJSON() []byte {
 	data, _ := json.Marshal(s)
 	return data
+}
+
+// handleClientError 处理客户端错误上报
+func (s *Server) handleClientError(client *ClientConn, msg *protocol.Message) {
+	cer, err := protocol.ParseClientErrorReport(msg.Payload)
+	if err != nil {
+		log.Printf("[Server] Failed to parse client error report: %v", err)
+		return
+	}
+
+	// 记录到日志
+	logMsg := fmt.Sprintf("[%s] %s", cer.ErrorType, cer.Message)
+	log.Printf("[Server] Client error from %s: %s", cer.ClientName, logMsg)
+
+	// 添加到日志列表
+	s.AddLog("error", "client", cer.ClientName, cer.ErrorType, cer.Message)
+}
+
+// AddLog 添加日志记录
+func (s *Server) AddLog(level, source, clientName, logType, message string) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+
+	entry := LogEntry{
+		Time:       time.Now(),
+		Level:      level,
+		Source:     source,
+		ClientName: clientName,
+		Type:       logType,
+		Message:    message,
+	}
+
+	s.logs = append(s.logs, entry)
+
+	// 限制日志数量，最多保留1000条
+	if len(s.logs) > 1000 {
+		s.logs = s.logs[len(s.logs)-1000:]
+	}
+}
+
+// GetLogs 获取日志列表
+func (s *Server) GetLogs(limit int) []LogEntry {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+
+	if limit <= 0 || limit > len(s.logs) {
+		limit = len(s.logs)
+	}
+
+	// 返回最新的日志（倒序）
+	result := make([]LogEntry, limit)
+	start := len(s.logs) - limit
+	for i := 0; i < limit; i++ {
+		result[i] = s.logs[start+limit-1-i]
+	}
+	return result
 }

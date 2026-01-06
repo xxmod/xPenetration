@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"xpenetration/internal/config"
@@ -43,6 +44,7 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/connections", ws.handleConnections)
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
 	ws.mux.HandleFunc("/api/config", ws.handleConfig)
+	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
 
 	// 静态文件（前端）
 	// 从 embed.FS 中获取 web 子目录
@@ -178,6 +180,25 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// handleLogs 处理日志请求
+func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 获取 limit 参数，默认100条
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	logs := ws.server.GetLogs(limit)
+	ws.writeJSON(w, logs)
 }
 
 // writeJSON 写入JSON响应

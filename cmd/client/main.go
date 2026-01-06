@@ -115,7 +115,7 @@ func main() {
 	}
 
 	log.Printf("===========================================")
-	log.Printf("  xPenetration Client v%s", version)
+	log.Printf("  xPenetration Client %s", version)
 	log.Printf("===========================================")
 	log.Printf("Server: %s:%d", cfg.Client.ServerAddr, cfg.Client.ServerPort)
 	log.Printf("Client Name: %s", cfg.Client.ClientName)
@@ -144,7 +144,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Printf(`xPenetration Client v%s
+	fmt.Printf(`xPenetration Client %s
 内网穿透客户端
 
 用法:

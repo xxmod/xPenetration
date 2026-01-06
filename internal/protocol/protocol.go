@@ -21,6 +21,7 @@ const (
 	MsgTypeError         uint8 = 9  // 错误消息
 	MsgTypeConnReady     uint8 = 10 // 连接就绪
 	MsgTypeUDPData       uint8 = 11 // UDP数据传输（通过TCP隧道，备用方法）
+	MsgTypeClientError   uint8 = 12 // 客户端错误上报
 )
 
 // UDP模式常量
@@ -122,6 +123,14 @@ type ErrorMessage struct {
 // Heartbeat 心跳消息
 type Heartbeat struct {
 	Timestamp int64 `json:"timestamp"`
+}
+
+// ClientErrorReport 客户端错误上报消息
+type ClientErrorReport struct {
+	ClientName string `json:"client_name"` // 客户端名称
+	ErrorType  string `json:"error_type"`  // 错误类型
+	Message    string `json:"message"`     // 错误消息
+	Timestamp  int64  `json:"timestamp"`   // 时间戳
 }
 
 // UDPDataMessage UDP数据消息（通过TCP隧道传输）
@@ -488,6 +497,33 @@ func ParseErrorMessage(payload []byte) (*ErrorMessage, error) {
 		return nil, err
 	}
 	return &em, nil
+}
+
+// NewClientErrorReport 创建客户端错误上报消息
+func NewClientErrorReport(clientName, errorType, message string, timestamp int64) (*Message, error) {
+	cer := ClientErrorReport{
+		ClientName: clientName,
+		ErrorType:  errorType,
+		Message:    message,
+		Timestamp:  timestamp,
+	}
+	payload, err := json.Marshal(cer)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{
+		Type:    MsgTypeClientError,
+		Payload: payload,
+	}, nil
+}
+
+// ParseClientErrorReport 解析客户端错误上报消息
+func ParseClientErrorReport(payload []byte) (*ClientErrorReport, error) {
+	var cer ClientErrorReport
+	if err := json.Unmarshal(payload, &cer); err != nil {
+		return nil, err
+	}
+	return &cer, nil
 }
 
 // NewUDPDataMessage 创建UDP数据消息（使用二进制编码提高性能）
