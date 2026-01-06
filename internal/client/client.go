@@ -677,7 +677,6 @@ func (c *Client) forwardUDPFromLocal(connInfo *UDPConnInfo) {
 		useNativeUDP := udpMode == protocol.UDPModeNative && c.nativeUDPConn != nil && c.serverUDPAddr != nil
 		// 如果数据包超过安全MTU大小，自动回退到TCP传输
 		if useNativeUDP && len(pktData) > protocol.UDPSafeMTU {
-			log.Printf("[Client] UDP packet size %d exceeds MTU %d, falling back to TCP for this packet", len(pktData), protocol.UDPSafeMTU)
 			useNativeUDP = false
 		}
 
@@ -687,8 +686,7 @@ func (c *Client) forwardUDPFromLocal(connInfo *UDPConnInfo) {
 			_, err = c.nativeUDPConn.WriteToUDP(pktData, c.serverUDPAddr)
 			c.mu.RUnlock()
 			if err != nil {
-				log.Printf("[Client] Failed to send native UDP response to server: %v, falling back to TCP", err)
-				// 发送失败时也回退到TCP
+				// 发送失败时回退到TCP
 				useNativeUDP = false
 			}
 		}
