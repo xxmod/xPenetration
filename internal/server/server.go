@@ -3,14 +3,121 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"xpenetration/internal/config"
 	"xpenetration/internal/protocol"
 )
+
+// LogWriter 自定义日志写入器，同时输出到控制台和收集到内存
+type LogWriter struct {
+	server    *Server
+	original  io.Writer
+	logRegexp *regexp.Regexp
+}
+
+// NewLogWriter 创建新的日志写入器
+func NewLogWriter(server *Server, original io.Writer) *LogWriter {
+	// 匹配日志格式: [Source] message 或普通文本
+	return &LogWriter{
+		server:    server,
+		original:  original,
+		logRegexp: regexp.MustCompile(`^\[([^\]]+)\]\s+(.*)$`),
+	}
+}
+
+// Write 实现 io.Writer 接口
+func (w *LogWriter) Write(p []byte) (n int, err error) {
+	// 先输出到原始控制台
+	n, err = w.original.Write(p)
+
+	// 然后收集到内存日志
+	if w.server != nil {
+		w.collectLog(string(p))
+	}
+
+	return n, err
+}
+
+// collectLog 收集日志到内存
+func (w *LogWriter) collectLog(logLine string) {
+	// 移除时间戳前缀 (log 包默认格式: 2006/01/02 15:04:05 message)
+	logLine = strings.TrimSpace(logLine)
+	if logLine == "" {
+		return
+	}
+
+	// 尝试移除标准时间戳前缀
+	if len(logLine) > 20 {
+		// 检查是否以日期时间开头 (YYYY/MM/DD HH:MM:SS)
+		if logLine[4] == '/' && logLine[7] == '/' && logLine[10] == ' ' {
+			spaceIdx := strings.Index(logLine[11:], " ")
+			if spaceIdx > 0 {
+				logLine = strings.TrimSpace(logLine[11+spaceIdx+1:])
+			}
+		}
+	}
+
+	// 解析日志来源
+	source := "server"
+	clientName := ""
+	logType := "general"
+	level := "info"
+	message := logLine
+
+	// 解析 [Source] 格式
+	matches := w.logRegexp.FindStringSubmatch(logLine)
+	if len(matches) == 3 {
+		source = strings.ToLower(matches[1])
+		message = matches[2]
+	}
+
+	// 判断日志级别
+	lowerMsg := strings.ToLower(message)
+	if strings.Contains(lowerMsg, "error") || strings.Contains(lowerMsg, "failed") {
+		level = "error"
+	} else if strings.Contains(lowerMsg, "warning") || strings.Contains(lowerMsg, "warn") {
+		level = "warn"
+	}
+
+	// 添加到日志列表
+	w.server.addLogEntry(level, source, clientName, logType, message)
+}
+
+// addLogEntry 内部添加日志记录（不触发 log.Printf 避免循环）
+func (s *Server) addLogEntry(level, source, clientName, logType, message string) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+
+	entry := LogEntry{
+		Time:       time.Now(),
+		Level:      level,
+		Source:     source,
+		ClientName: clientName,
+		Type:       logType,
+		Message:    message,
+	}
+
+	s.logs = append(s.logs, entry)
+
+	// 限制日志数量，最多保留5000条
+	if len(s.logs) > 5000 {
+		s.logs = s.logs[len(s.logs)-5000:]
+	}
+}
+
+// SetupLogCapture 设置日志捕获
+func (s *Server) SetupLogCapture() {
+	logWriter := NewLogWriter(s, os.Stderr)
+	log.SetOutput(logWriter)
+}
 
 // Server 服务端结构
 type Server struct {
@@ -1096,26 +1203,10 @@ func (s *Server) handleClientError(client *ClientConn, msg *protocol.Message) {
 	s.AddLog("error", "client", cer.ClientName, cer.ErrorType, cer.Message)
 }
 
-// AddLog 添加日志记录
+// AddLog 添加日志记录（同时输出到控制台）
 func (s *Server) AddLog(level, source, clientName, logType, message string) {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-
-	entry := LogEntry{
-		Time:       time.Now(),
-		Level:      level,
-		Source:     source,
-		ClientName: clientName,
-		Type:       logType,
-		Message:    message,
-	}
-
-	s.logs = append(s.logs, entry)
-
-	// 限制日志数量，最多保留1000条
-	if len(s.logs) > 1000 {
-		s.logs = s.logs[len(s.logs)-1000:]
-	}
+	// 输出到控制台（这会同时被 LogWriter 捕获并收集）
+	log.Printf("[%s] %s", source, message)
 }
 
 // GetLogs 获取日志列表
