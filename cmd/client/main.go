@@ -18,7 +18,7 @@ var (
 	serverPort int
 	secretKey  string
 	clientName string
-	version    = "1.0.0"
+	version    = "dev" // 通过 -ldflags "-X main.version=xxx" 注入，版本号定义在 .env 文件中
 	showHelp   bool
 	showVer    bool
 )
@@ -49,7 +49,7 @@ func main() {
 	}
 
 	if showVer {
-		fmt.Printf("xPenetration Client v%s\n", version)
+		fmt.Printf("xPenetration Client %s\n", version)
 		return
 	}
 

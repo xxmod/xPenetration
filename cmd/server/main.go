@@ -14,7 +14,7 @@ import (
 
 var (
 	configPath string
-	version    = "1.0.0"
+	version    = "dev" // 通过 -ldflags "-X main.version=xxx" 注入，版本号定义在 .env 文件中
 	showHelp   bool
 	showVer    bool
 )
@@ -37,12 +37,12 @@ func main() {
 	}
 
 	if showVer {
-		fmt.Printf("xPenetration Server v%s\n", version)
+		fmt.Printf("xPenetration Server %s\n", version)
 		return
 	}
 
 	log.Printf("===========================================")
-	log.Printf("  xPenetration Server v%s", version)
+	log.Printf("  xPenetration Server %s", version)
 	log.Printf("===========================================")
 
 	// 尝试加载配置

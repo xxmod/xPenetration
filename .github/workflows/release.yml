@@ -25,8 +25,45 @@ jobs:
         with:
           go-version: stable
 
+      - name: Read version from .env
+        id: version
+        run: |
+          # 从 .env 文件读取版本号
+          VERSION=$(grep -E '^version=' .env | cut -d'=' -f2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          # 获取上一个 tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          echo "Previous tag: $PREV_TAG"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          PREV_TAG=${{ steps.prev_tag.outputs.prev_tag }}
+          
+          echo "Generating changelog..."
+          
+          if [ -z "$PREV_TAG" ]; then
+            # 如果没有上一个 tag，获取所有 commits
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            # 获取从上一个 tag 到当前的所有 commits
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          # 处理多行输出
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "changelog<<$EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
       - name: Download Go dependencies
-        if: "!startsWith(github.ref, 'refs/tags/')"
         run: |
           go mod download
           go mod tidy
@@ -42,28 +79,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 当推送到分支时，自动创建 tag 并发布
-      - name: Get version from commit
-        if: "!startsWith(github.ref, 'refs/tags/')"
-        id: version
-        run: |
-          # 使用日期和短 commit hash 生成版本号
-          VERSION="v0.0.0-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
+      # 当推送到分支时，构建并发布
       - name: Build binaries
         if: "!startsWith(github.ref, 'refs/tags/')"
         run: |
+          VERSION=${{ steps.version.outputs.version }}
+          LDFLAGS="-X main.version=${VERSION}"
           mkdir -p dist
-          # 构建多平台二进制文件
-          GOOS=linux GOARCH=amd64 go build -o dist/xpen-server-linux-amd64 ./cmd/server
-          GOOS=linux GOARCH=amd64 go build -o dist/xpen-client-linux-amd64 ./cmd/client
-          GOOS=windows GOARCH=amd64 go build -o dist/xpen-server-windows-amd64.exe ./cmd/server
-          GOOS=windows GOARCH=amd64 go build -o dist/xpen-client-windows-amd64.exe ./cmd/client
-          GOOS=darwin GOARCH=amd64 go build -o dist/xpen-server-darwin-amd64 ./cmd/server
-          GOOS=darwin GOARCH=amd64 go build -o dist/xpen-client-darwin-amd64 ./cmd/client
-          GOOS=darwin GOARCH=arm64 go build -o dist/xpen-server-darwin-arm64 ./cmd/server
-          GOOS=darwin GOARCH=arm64 go build -o dist/xpen-client-darwin-arm64 ./cmd/client
+          # 构建多平台二进制文件，注入版本号
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-linux-amd64 ./cmd/server
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-linux-amd64 ./cmd/client
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-windows-amd64.exe ./cmd/server
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-windows-amd64.exe ./cmd/client
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-darwin-amd64 ./cmd/server
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-darwin-amd64 ./cmd/client
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-darwin-arm64 ./cmd/server
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-darwin-arm64 ./cmd/client
 
       - name: Create Release
         if: "!startsWith(github.ref, 'refs/tags/')"
@@ -72,7 +103,12 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: Release ${{ steps.version.outputs.version }}
           body: |
-            Automated release from commit ${{ github.sha }}
+            ## What's Changed
+            
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ---
+            **Full Changelog**: ${{ steps.prev_tag.outputs.prev_tag }}...${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           files: |
