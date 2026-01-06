@@ -430,19 +430,55 @@ func (c *Client) startNativeUDPTransport() error {
 
 	log.Printf("[Client] Native UDP transport connected to %s", serverUDPAddr)
 
-	// 发送注册包，告知服务端客户端的UDP地址
-	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName)
-	_, err = conn.WriteToUDP(registerPkt, udpAddr)
-	if err != nil {
-		log.Printf("[Client] Warning: Failed to send UDP register packet: %v", err)
-	} else {
-		log.Printf("[Client] Sent UDP register packet to server")
-	}
+	// 启动定期发送注册包的goroutine（每30分钟发送一次，因为IP和端口可能会变化）
+	go c.udpRegisterLoop()
 
 	// 启动接收服务端UDP数据的goroutine
 	go c.handleNativeUDPFromServer()
 
 	return nil
+}
+
+// udpRegisterLoop 定期发送UDP注册包
+func (c *Client) udpRegisterLoop() {
+	// 先立即发送一次注册包
+	c.sendUDPRegisterPacket()
+
+	// 每30分钟发送一次注册包
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !c.running || !c.connected {
+				return
+			}
+			c.sendUDPRegisterPacket()
+		case <-c.stopChan:
+			return
+		}
+	}
+}
+
+// sendUDPRegisterPacket 发送UDP注册包
+func (c *Client) sendUDPRegisterPacket() {
+	c.mu.RLock()
+	conn := c.nativeUDPConn
+	addr := c.serverUDPAddr
+	c.mu.RUnlock()
+
+	if conn == nil || addr == nil {
+		return
+	}
+
+	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName)
+	_, err := conn.WriteToUDP(registerPkt, addr)
+	if err != nil {
+		log.Printf("[Client] Warning: Failed to send UDP register packet: %v", err)
+	} else {
+		log.Printf("[Client] Sent UDP register packet to server")
+	}
 }
 
 // handleNativeUDPFromServer 处理来自服务端的原生UDP数据
