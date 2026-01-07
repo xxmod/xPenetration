@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -51,6 +53,51 @@ const (
 	UDPCleanupInterval   = 1 * time.Minute  // UDP地址清理间隔（1分钟）
 )
 
+// 版本常量
+const (
+	CurrentVersion = "2.0.0" // 当前版本
+	MinimumVersion = "2.0.0" // 最低兼容版本
+)
+
+// CompareVersion 比较两个版本号
+// 返回: -1 表示 v1 < v2, 0 表示 v1 == v2, 1 表示 v1 > v2
+func CompareVersion(v1, v2 string) int {
+	// 移除可能的 "v" 前缀
+	v1 = strings.TrimPrefix(v1, "v")
+	v2 = strings.TrimPrefix(v2, "v")
+
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+
+	// 确保至少有3个部分
+	for len(parts1) < 3 {
+		parts1 = append(parts1, "0")
+	}
+	for len(parts2) < 3 {
+		parts2 = append(parts2, "0")
+	}
+
+	for i := 0; i < 3; i++ {
+		n1, _ := strconv.Atoi(parts1[i])
+		n2, _ := strconv.Atoi(parts2[i])
+		if n1 < n2 {
+			return -1
+		}
+		if n1 > n2 {
+			return 1
+		}
+	}
+	return 0
+}
+
+// IsVersionCompatible 检查版本是否兼容（是否 >= MinimumVersion）
+func IsVersionCompatible(version string) bool {
+	if version == "" {
+		return false // 空版本视为不兼容（可能是旧客户端）
+	}
+	return CompareVersion(version, MinimumVersion) >= 0
+}
+
 // 原生UDP数据包类型
 const (
 	NativeUDPTypeRegister uint8 = 0 // 注册包（客户端发送给服务端，告知UDP地址）
@@ -83,6 +130,7 @@ type AuthResponse struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
 	ClientID string `json:"client_id"`
+	Version  string `json:"version"` // 服务端版本
 }
 
 // TunnelConfig 隧道配置
@@ -278,7 +326,7 @@ func NewAuthRequest(secretKey, clientName string) (*Message, error) {
 	req := AuthRequest{
 		SecretKey:  secretKey,
 		ClientName: clientName,
-		Version:    "1.0.0",
+		Version:    CurrentVersion,
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -296,6 +344,7 @@ func NewAuthResponse(success bool, message, clientID string) (*Message, error) {
 		Success:  success,
 		Message:  message,
 		ClientID: clientID,
+		Version:  CurrentVersion,
 	}
 	payload, err := json.Marshal(resp)
 	if err != nil {

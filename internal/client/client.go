@@ -145,8 +145,15 @@ func (c *Client) connect() error {
 		return fmt.Errorf("authentication failed: %s", authResp.Message)
 	}
 
+	// 检查服务端版本
+	if !protocol.IsVersionCompatible(authResp.Version) {
+		conn.Close()
+		return fmt.Errorf("server version %s is not compatible, minimum required: %s",
+			authResp.Version, protocol.MinimumVersion)
+	}
+
 	c.clientID = authResp.ClientID
-	log.Printf("[Client] Authentication successful, client ID: %s", c.clientID)
+	log.Printf("[Client] Authentication successful, client ID: %s, server version: %s", c.clientID, authResp.Version)
 
 	// 接收隧道配置
 	msg, err = protocol.DecodeMessage(conn)

@@ -697,6 +697,16 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		return
 	}
 
+	// 检查客户端版本
+	if !protocol.IsVersionCompatible(authReq.Version) {
+		log.Printf("[Server] Client version %s is not compatible (minimum required: %s), client: %s",
+			authReq.Version, protocol.MinimumVersion, authReq.ClientName)
+		s.sendAuthResponse(conn, false, fmt.Sprintf("Client version %s is not compatible, minimum required: %s",
+			authReq.Version, protocol.MinimumVersion), "")
+		conn.Close()
+		return
+	}
+
 	// 验证密钥
 	clientConfig := s.findClientConfig(authReq.ClientName)
 	if clientConfig == nil {
