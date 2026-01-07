@@ -251,6 +251,23 @@ func (c *ClientConn) SendData(msg *protocol.Message) bool {
 	}
 }
 
+// SendDataWithTimeout 尝试在超时时间内发送数据消息，避免瞬时队列满导致断连
+func (c *ClientConn) SendDataWithTimeout(msg *protocol.Message, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return c.SendData(msg)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case c.dataQueue <- msg:
+		return true
+	case <-c.sendDone:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
 // Close 关闭客户端连接
 func (c *ClientConn) Close() {
 	c.Conn.Close()
@@ -653,8 +670,8 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 			return
 		}
 
-		if !client.SendData(msg) {
-			log.Printf("[Server] Failed to send UDP data to client: queue full")
+		if !client.SendDataWithTimeout(msg, 200*time.Millisecond) {
+			log.Printf("[Server] Failed to send UDP data to client: queue congested")
 		}
 	}
 }
@@ -1105,9 +1122,9 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 			return
 		}
 
-		if !client.SendData(msg) {
-			// 队列满，客户端处理不过来，断开连接
-			log.Printf("[Server] Send queue full for connection %s, closing", proxyConn.ID)
+		if !client.SendDataWithTimeout(msg, 500*time.Millisecond) {
+			// 队列持续拥堵，客户端处理不过来，断开连接
+			log.Printf("[Server] Send queue congested for connection %s, closing", proxyConn.ID)
 			return
 		}
 

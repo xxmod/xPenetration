@@ -31,3 +31,6 @@ go.sum
 # Test
 coverage.out
 coverage.html
+
+# Local build helpers (not tracked)
+build-linux.bat

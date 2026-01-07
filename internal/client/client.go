@@ -116,6 +116,23 @@ func (c *Client) sendData(msg *protocol.Message) bool {
 	}
 }
 
+// sendDataWithTimeout 尝试在超时时间内发送数据消息，避免瞬时队列满导致断连
+func (c *Client) sendDataWithTimeout(msg *protocol.Message, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return c.sendData(msg)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case c.dataQueue <- msg:
+		return true
+	case <-c.sendDone:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
 // TCPConnInfo TCP连接信息，支持异步数据处理
 type TCPConnInfo struct {
 	Conn     net.Conn
@@ -466,10 +483,9 @@ func (c *Client) forwardFromLocal(connID string, connInfo *TCPConnInfo) {
 			return
 		}
 
-		// 异步发送，避免阻塞其他连接
-		if !c.sendData(msg) {
-			// 队列满，断开连接
-			log.Printf("[Client] Send queue full for connection %s, closing", connID)
+		// 优先尝试带超时的发送，避免瞬时拥塞直接断开
+		if !c.sendDataWithTimeout(msg, 500*time.Millisecond) {
+			log.Printf("[Client] Send queue congested for connection %s, closing", connID)
 			return
 		}
 	}
@@ -861,8 +877,8 @@ func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data 
 			return
 		}
 
-		if !c.sendData(msg) {
-			log.Printf("[Client] Failed to send UDP response to server: queue full")
+		if !c.sendDataWithTimeout(msg, 200*time.Millisecond) {
+			log.Printf("[Client] Failed to send UDP response to server: queue congested")
 		}
 	}
 }
