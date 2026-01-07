@@ -175,44 +175,78 @@ type ClientConn struct {
 	Tunnels       []protocol.Tunnel
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
-	sendQueue     chan *protocol.Message // 发送队列，支持高并发异步发送
+	controlQueue  chan *protocol.Message // 控制消息队列（优先）
+	dataQueue     chan *protocol.Message // 数据消息队列
 	sendDone      chan struct{}          // 发送协程退出信号
 	mu            sync.Mutex             // 用于一般操作
 }
 
-// sendLoop 发送循环，从队列中读取消息并发送
+// sendLoop 发送循环，优先发送控制消息，再发送数据消息
 func (c *ClientConn) sendLoop() {
-	for msg := range c.sendQueue {
-		if err := protocol.SendMessage(c.Conn, msg); err != nil {
-			log.Printf("[Server] Failed to send message to client %s: %v", c.Name, err)
-			c.Conn.Close()
-			// 排空队列
-			for range c.sendQueue {
+	for {
+		// 优先处理控制消息
+		select {
+		case msg, ok := <-c.controlQueue:
+			if !ok {
+				c.controlQueue = nil
+				goto checkExit
 			}
+			if err := protocol.SendMessage(c.Conn, msg); err != nil {
+				log.Printf("[Server] Failed to send control message to client %s: %v", c.Name, err)
+				goto exit
+			}
+			continue
+		default:
+		}
+
+		// 没有控制消息，处理数据消息
+		select {
+		case msg, ok := <-c.controlQueue:
+			if ok {
+				if err := protocol.SendMessage(c.Conn, msg); err != nil {
+					log.Printf("[Server] Failed to send control message to client %s: %v", c.Name, err)
+					goto exit
+				}
+				continue
+			}
+			c.controlQueue = nil
+		case msg, ok := <-c.dataQueue:
+			if ok {
+				if err := protocol.SendMessage(c.Conn, msg); err != nil {
+					log.Printf("[Server] Failed to send data message to client %s: %v", c.Name, err)
+					goto exit
+				}
+				continue
+			}
+			c.dataQueue = nil
+		}
+
+	checkExit:
+		if c.controlQueue == nil && c.dataQueue == nil {
 			break
 		}
 	}
+
+exit:
 	close(c.sendDone)
 }
 
-// Send 异步发送消息到客户端（非阻塞）
-func (c *ClientConn) Send(msg *protocol.Message) bool {
+// SendControl 同步发送控制消息（关键消息），若已关闭返回false
+func (c *ClientConn) SendControl(msg *protocol.Message) bool {
 	select {
-	case c.sendQueue <- msg:
+	case c.controlQueue <- msg:
 		return true
-	default:
-		// 队列满，记录警告但不阻塞
-		log.Printf("[Server] Warning: send queue full for client %s, dropping message", c.Name)
+	case <-c.sendDone:
 		return false
 	}
 }
 
-// SendSync 同步发送消息（用于关键消息，会阻塞等待队列空间）
-func (c *ClientConn) SendSync(msg *protocol.Message) bool {
+// SendData 异步发送数据消息，队列满则返回false并丢弃
+func (c *ClientConn) SendData(msg *protocol.Message) bool {
 	select {
-	case c.sendQueue <- msg:
+	case c.dataQueue <- msg:
 		return true
-	case <-c.sendDone:
+	default:
 		return false
 	}
 }
@@ -220,12 +254,18 @@ func (c *ClientConn) SendSync(msg *protocol.Message) bool {
 // Close 关闭客户端连接
 func (c *ClientConn) Close() {
 	c.Conn.Close()
-	// 关闭发送队列会导致 sendLoop 退出
+	// 关闭发送队列以结束 sendLoop
 	select {
 	case <-c.sendDone:
 		// 已经关闭
 	default:
-		close(c.sendQueue)
+		if c.controlQueue != nil {
+			close(c.controlQueue)
+		}
+		if c.dataQueue != nil {
+			close(c.dataQueue)
+		}
+		<-c.sendDone
 	}
 }
 
@@ -613,7 +653,7 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 			return
 		}
 
-		if !client.Send(msg) {
+		if !client.SendData(msg) {
 			log.Printf("[Server] Failed to send UDP data to client: queue full")
 		}
 	}
@@ -740,7 +780,8 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		Tunnels:       clientConfig.Tunnels,
 		ConnectedAt:   time.Now(),
 		LastHeartbeat: time.Now(),
-		sendQueue:     make(chan *protocol.Message, 1024), // 缓冲队列，支持突发流量
+		controlQueue:  make(chan *protocol.Message, 128),  // 控制消息小队列，优先级高
+		dataQueue:     make(chan *protocol.Message, 4096), // 数据消息大队列
 		sendDone:      make(chan struct{}),
 	}
 
@@ -865,7 +906,7 @@ func (s *Server) handleHeartbeat(client *ClientConn, msg *protocol.Message) {
 
 	// 发送心跳确认
 	ackMsg, _ := protocol.NewHeartbeatAck(hb.Timestamp)
-	client.Send(ackMsg)
+	client.SendControl(ackMsg)
 }
 
 // handleConnReady 处理连接就绪消息
@@ -1005,7 +1046,7 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 		return
 	}
 
-	if !client.SendSync(msg) {
+	if !client.SendControl(msg) {
 		log.Printf("[Server] Failed to send new connection message: client disconnected")
 		conn.Close()
 		s.mu.Lock()
@@ -1048,7 +1089,7 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 
 		// 通知客户端断开连接
 		msg, _ := protocol.NewDisconnectMessage(proxyConn.ID, "external connection closed")
-		client.Send(msg)
+		client.SendControl(msg)
 	}()
 
 	buf := make([]byte, 32*1024)
@@ -1064,7 +1105,7 @@ func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
 			return
 		}
 
-		if !client.Send(msg) {
+		if !client.SendData(msg) {
 			// 队列满，客户端处理不过来，断开连接
 			log.Printf("[Server] Send queue full for connection %s, closing", proxyConn.ID)
 			return

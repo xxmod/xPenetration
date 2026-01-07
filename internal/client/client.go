@@ -21,7 +21,8 @@ type Client struct {
 	udpConns      map[int]*UDPConnInfo    // clientPort -> UDP connection info
 	nativeUDPConn *net.UDPConn            // 与服务端的原生UDP传输连接
 	serverUDPAddr *net.UDPAddr            // 服务端UDP地址
-	sendQueue     chan *protocol.Message  // 发送队列，支持高并发异步发送
+	controlQueue  chan *protocol.Message  // 控制消息队列（优先）
+	dataQueue     chan *protocol.Message  // 数据消息队列
 	sendDone      chan struct{}           // 发送协程退出信号
 	mu            sync.RWMutex
 	udpMu         sync.RWMutex // UDP专用锁，减少锁竞争
@@ -30,43 +31,87 @@ type Client struct {
 	stopChan      chan struct{}
 }
 
-// sendLoop 发送循环，从队列中读取消息并发送
+// sendLoop 发送循环，优先发送控制消息
 func (c *Client) sendLoop() {
-	for msg := range c.sendQueue {
-		c.mu.RLock()
-		conn := c.conn
-		c.mu.RUnlock()
-		if conn == nil {
-			continue
-		}
-		if err := protocol.SendMessage(conn, msg); err != nil {
-			log.Printf("[Client] Failed to send message: %v", err)
-			// 排空队列
-			for range c.sendQueue {
+	for {
+		// 优先控制消息
+		select {
+		case msg, ok := <-c.controlQueue:
+			if !ok {
+				c.controlQueue = nil
+				goto checkExit
 			}
+			c.mu.RLock()
+			conn := c.conn
+			c.mu.RUnlock()
+			if conn != nil {
+				if err := protocol.SendMessage(conn, msg); err != nil {
+					log.Printf("[Client] Failed to send control message: %v", err)
+					goto exit
+				}
+			}
+			continue
+		default:
+		}
+
+		// 数据消息
+		select {
+		case msg, ok := <-c.controlQueue:
+			if ok {
+				c.mu.RLock()
+				conn := c.conn
+				c.mu.RUnlock()
+				if conn != nil {
+					if err := protocol.SendMessage(conn, msg); err != nil {
+						log.Printf("[Client] Failed to send control message: %v", err)
+						goto exit
+					}
+				}
+				continue
+			}
+			c.controlQueue = nil
+		case msg, ok := <-c.dataQueue:
+			if ok {
+				c.mu.RLock()
+				conn := c.conn
+				c.mu.RUnlock()
+				if conn != nil {
+					if err := protocol.SendMessage(conn, msg); err != nil {
+						log.Printf("[Client] Failed to send data message: %v", err)
+						goto exit
+					}
+				}
+				continue
+			}
+			c.dataQueue = nil
+		}
+
+	checkExit:
+		if c.controlQueue == nil && c.dataQueue == nil {
 			break
 		}
 	}
+
+exit:
 	close(c.sendDone)
 }
 
-// send 异步发送消息（非阻塞）
-func (c *Client) send(msg *protocol.Message) bool {
+// sendControl 同步发送控制消息
+func (c *Client) sendControl(msg *protocol.Message) bool {
 	select {
-	case c.sendQueue <- msg:
+	case c.controlQueue <- msg:
 		return true
-	default:
-		log.Printf("[Client] Warning: send queue full, dropping message")
+	case <-c.sendDone:
 		return false
 	}
 }
 
-// sendSync 同步发送消息（用于关键消息）
-func (c *Client) sendSyncMsg(msg *protocol.Message) bool {
+// sendData 异步发送数据消息，队列满则丢弃
+func (c *Client) sendData(msg *protocol.Message) bool {
 	select {
-	case c.sendQueue <- msg:
+	case c.dataQueue <- msg:
 		return true
-	case <-c.sendDone:
+	default:
 		return false
 	}
 }
@@ -123,8 +168,9 @@ func (c *Client) Start() error {
 			continue
 		}
 
-		// 初始化发送队列
-		c.sendQueue = make(chan *protocol.Message, 1024)
+		// 初始化发送队列（控制/数据分离，控制优先）
+		c.controlQueue = make(chan *protocol.Message, 128)
+		c.dataQueue = make(chan *protocol.Message, 4096)
 		c.sendDone = make(chan struct{})
 		go c.sendLoop()
 
@@ -278,7 +324,7 @@ func (c *Client) sendHeartbeat() {
 	if err != nil {
 		return
 	}
-	c.send(msg)
+	c.sendControl(msg)
 }
 
 // handleMessages 处理服务端消息
@@ -382,7 +428,9 @@ func (c *Client) sendConnReady(connID string, success bool, message string) {
 	if err != nil {
 		return
 	}
-	c.sendSyncMsg(msg)
+	if !c.sendControl(msg) {
+		log.Printf("[Client] Failed to enqueue conn-ready for %s", connID)
+	}
 }
 
 // forwardFromLocal 从本地连接转发数据到服务端
@@ -419,7 +467,7 @@ func (c *Client) forwardFromLocal(connID string, connInfo *TCPConnInfo) {
 		}
 
 		// 异步发送，避免阻塞其他连接
-		if !c.send(msg) {
+		if !c.sendData(msg) {
 			// 队列满，断开连接
 			log.Printf("[Client] Send queue full for connection %s, closing", connID)
 			return
@@ -433,7 +481,7 @@ func (c *Client) sendDisconnect(connID, reason string) {
 	if err != nil {
 		return
 	}
-	c.send(msg)
+	c.sendControl(msg)
 }
 
 // handleData 处理服务端发来的数据
@@ -813,7 +861,7 @@ func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data 
 			return
 		}
 
-		if !c.send(msg) {
+		if !c.sendData(msg) {
 			log.Printf("[Client] Failed to send UDP response to server: queue full")
 		}
 	}
@@ -956,12 +1004,17 @@ func (c *Client) cleanup() {
 	c.serverUDPAddr = nil
 
 	// 关闭发送队列
-	if c.sendQueue != nil {
+	if c.sendDone != nil {
 		select {
 		case <-c.sendDone:
 			// 已经关闭
 		default:
-			close(c.sendQueue)
+			if c.controlQueue != nil {
+				close(c.controlQueue)
+			}
+			if c.dataQueue != nil {
+				close(c.dataQueue)
+			}
 			<-c.sendDone // 等待发送协程退出
 		}
 	}
@@ -1011,5 +1064,5 @@ func (c *Client) ReportError(errorType, message string) {
 		log.Printf("[Client] Failed to create error report: %v", err)
 		return
 	}
-	c.send(msg)
+	c.sendControl(msg)
 }
