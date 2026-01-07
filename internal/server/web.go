@@ -47,6 +47,8 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
 	ws.mux.HandleFunc("/api/config", ws.handleConfig)
 	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
+	// 兼容 /status 与 /status/（部分监控探针不一定带尾部斜杠）
+	ws.mux.HandleFunc("/status", ws.handleStatus)
 	ws.mux.HandleFunc("/status/", ws.handleStatus)
 
 	// 静态文件（前端）
@@ -223,10 +225,12 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleStatus 处理状态检查请求
 func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
 	// 检查最近20分钟是否有ERROR日志
 	hasError := ws.server.HasRecentErrors(20 * 60)
@@ -236,9 +240,14 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	if hasError || hasDisconnected {
 		w.WriteHeader(220)
-		w.Write([]byte("Some Services Wrong"))
-	} else {
-		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			w.Write([]byte("Some Services Wrong"))
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
 		w.Write([]byte("All Services OK"))
 	}
 }
