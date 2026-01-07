@@ -228,8 +228,8 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 检查最近5分钟是否有ERROR日志
-	hasError := ws.server.HasRecentErrors(5 * 60) // 5分钟 = 300秒
+	// 检查最近20分钟是否有ERROR日志
+	hasError := ws.server.HasRecentErrors(20 * 60)
 
 	// 检查是否有已配置但未连接的客户端
 	hasDisconnected := ws.server.HasDisconnectedClients()

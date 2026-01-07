@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/yamux"
+
 	"xpenetration/internal/config"
 	"xpenetration/internal/protocol"
 )
@@ -172,117 +174,48 @@ type ClientConn struct {
 	ID            string
 	Name          string
 	Conn          net.Conn
+	Session       *yamux.Session // yamux多路复用会话
+	ControlStream net.Conn       // 控制流（心跳、UDP数据等）
 	Tunnels       []protocol.Tunnel
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
-	controlQueue  chan *protocol.Message // 控制消息队列（优先）
-	dataQueue     chan *protocol.Message // 数据消息队列
-	sendDone      chan struct{}          // 发送协程退出信号
-	mu            sync.Mutex             // 用于一般操作
+	mu            sync.Mutex // 用于一般操作
 }
 
-// sendLoop 发送循环，优先发送控制消息，再发送数据消息
-func (c *ClientConn) sendLoop() {
-	for {
-		// 优先处理控制消息
-		select {
-		case msg, ok := <-c.controlQueue:
-			if !ok {
-				c.controlQueue = nil
-				goto checkExit
-			}
-			if err := protocol.SendMessage(c.Conn, msg); err != nil {
-				log.Printf("[Server] Failed to send control message to client %s: %v", c.Name, err)
-				goto exit
-			}
-			continue
-		default:
-		}
-
-		// 没有控制消息，处理数据消息
-		select {
-		case msg, ok := <-c.controlQueue:
-			if ok {
-				if err := protocol.SendMessage(c.Conn, msg); err != nil {
-					log.Printf("[Server] Failed to send control message to client %s: %v", c.Name, err)
-					goto exit
-				}
-				continue
-			}
-			c.controlQueue = nil
-		case msg, ok := <-c.dataQueue:
-			if ok {
-				if err := protocol.SendMessage(c.Conn, msg); err != nil {
-					log.Printf("[Server] Failed to send data message to client %s: %v", c.Name, err)
-					goto exit
-				}
-				continue
-			}
-			c.dataQueue = nil
-		}
-
-	checkExit:
-		if c.controlQueue == nil && c.dataQueue == nil {
-			break
-		}
-	}
-
-exit:
-	close(c.sendDone)
-}
-
-// SendControl 同步发送控制消息（关键消息），若已关闭返回false
+// SendControl 发送控制消息到控制流
 func (c *ClientConn) SendControl(msg *protocol.Message) bool {
-	select {
-	case c.controlQueue <- msg:
-		return true
-	case <-c.sendDone:
+	c.mu.Lock()
+	stream := c.ControlStream
+	c.mu.Unlock()
+	if stream == nil {
 		return false
 	}
+	return protocol.SendMessage(stream, msg) == nil
 }
 
-// SendData 异步发送数据消息，队列满则返回false并丢弃
-func (c *ClientConn) SendData(msg *protocol.Message) bool {
-	select {
-	case c.dataQueue <- msg:
-		return true
-	default:
-		return false
+// OpenStream 打开新的数据流用于TCP连接
+func (c *ClientConn) OpenStream() (net.Conn, error) {
+	if c.Session == nil {
+		return nil, fmt.Errorf("session is nil")
 	}
-}
-
-// SendDataWithTimeout 尝试在超时时间内发送数据消息，避免瞬时队列满导致断连
-func (c *ClientConn) SendDataWithTimeout(msg *protocol.Message, timeout time.Duration) bool {
-	if timeout <= 0 {
-		return c.SendData(msg)
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case c.dataQueue <- msg:
-		return true
-	case <-c.sendDone:
-		return false
-	case <-timer.C:
-		return false
-	}
+	return c.Session.Open()
 }
 
 // Close 关闭客户端连接
 func (c *ClientConn) Close() {
-	c.Conn.Close()
-	// 关闭发送队列以结束 sendLoop
-	select {
-	case <-c.sendDone:
-		// 已经关闭
-	default:
-		if c.controlQueue != nil {
-			close(c.controlQueue)
-		}
-		if c.dataQueue != nil {
-			close(c.dataQueue)
-		}
-		<-c.sendDone
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ControlStream != nil {
+		c.ControlStream.Close()
+		c.ControlStream = nil
+	}
+	if c.Session != nil {
+		c.Session.Close()
+		c.Session = nil
+	}
+	if c.Conn != nil {
+		c.Conn.Close()
 	}
 }
 
@@ -658,7 +591,7 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 	}
 
 	if !useNativeUDP {
-		// TCP封装传输（备用方法或MTU超限回退）：通过TCP控制通道发送UDP数据
+		// TCP封装传输（备用方法或MTU超限回退）：通过控制流发送UDP数据
 		msg, err := protocol.NewUDPDataMessage(
 			udpListener.Tunnel.Name,
 			udpListener.Tunnel.ClientPort,
@@ -670,8 +603,8 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 			return
 		}
 
-		if !client.SendDataWithTimeout(msg, 200*time.Millisecond) {
-			log.Printf("[Server] Failed to send UDP data to client: queue congested")
+		if !client.SendControl(msg) {
+			log.Printf("[Server] Failed to send UDP data to client: control stream error")
 		}
 	}
 }
@@ -737,8 +670,6 @@ func (s *Server) acceptClients(listener net.Listener) {
 
 // handleClientConnection 处理客户端连接
 func (s *Server) handleClientConnection(conn net.Conn) {
-	defer conn.Close()
-
 	// 设置读取超时
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
@@ -746,12 +677,14 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	msg, err := protocol.DecodeMessage(conn)
 	if err != nil {
 		log.Printf("[Server] Failed to read auth message: %v", err)
+		conn.Close()
 		return
 	}
 
 	if msg.Type != protocol.MsgTypeAuth {
 		log.Printf("[Server] Expected auth message, got type %d", msg.Type)
 		s.sendError(conn, 1, "Expected authentication message")
+		conn.Close()
 		return
 	}
 
@@ -760,6 +693,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	if err != nil {
 		log.Printf("[Server] Failed to parse auth request: %v", err)
 		s.sendError(conn, 2, "Invalid authentication request")
+		conn.Close()
 		return
 	}
 
@@ -768,6 +702,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	if clientConfig == nil {
 		log.Printf("[Server] Unknown client: %s", authReq.ClientName)
 		s.sendAuthResponse(conn, false, "Unknown client", "")
+		conn.Close()
 		return
 	}
 
@@ -780,6 +715,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	if authReq.SecretKey != expectedKey {
 		log.Printf("[Server] Invalid secret key from client: %s", authReq.ClientName)
 		s.sendAuthResponse(conn, false, "Invalid secret key", "")
+		conn.Close()
 		return
 	}
 
@@ -789,21 +725,58 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	// 清除读取超时
 	conn.SetReadDeadline(time.Time{})
 
+	log.Printf("[Server] Client authenticated: %s (ID: %s)", authReq.ClientName, clientID)
+
+	// 发送认证成功响应
+	if err := s.sendAuthResponse(conn, true, "Authentication successful", clientID); err != nil {
+		log.Printf("[Server] Failed to send auth response: %v", err)
+		conn.Close()
+		return
+	}
+
+	// 发送隧道配置
+	if err := s.sendTunnelConfig(conn, clientConfig.Tunnels); err != nil {
+		log.Printf("[Server] Failed to send tunnel config: %v", err)
+		conn.Close()
+		return
+	}
+
+	// 创建yamux服务端会话（服务端作为yamux服务端）
+	yamuxConfig := yamux.DefaultConfig()
+	yamuxConfig.AcceptBacklog = 256
+	yamuxConfig.EnableKeepAlive = true
+	yamuxConfig.KeepAliveInterval = 30 * time.Second
+	yamuxConfig.ConnectionWriteTimeout = 30 * time.Second
+	yamuxConfig.StreamOpenTimeout = 30 * time.Second
+	yamuxConfig.StreamCloseTimeout = 5 * time.Minute
+	yamuxConfig.MaxStreamWindowSize = 16 * 1024 * 1024 // 16MB窗口大小，支持高带宽
+
+	session, err := yamux.Server(conn, yamuxConfig)
+	if err != nil {
+		log.Printf("[Server] Failed to create yamux session: %v", err)
+		conn.Close()
+		return
+	}
+
+	// 接受客户端打开的控制流
+	controlStream, err := session.Accept()
+	if err != nil {
+		log.Printf("[Server] Failed to accept control stream: %v", err)
+		session.Close()
+		return
+	}
+
 	// 创建客户端连接记录
 	clientConn := &ClientConn{
 		ID:            clientID,
 		Name:          authReq.ClientName,
 		Conn:          conn,
+		Session:       session,
+		ControlStream: controlStream,
 		Tunnels:       clientConfig.Tunnels,
 		ConnectedAt:   time.Now(),
 		LastHeartbeat: time.Now(),
-		controlQueue:  make(chan *protocol.Message, 128),  // 控制消息小队列，优先级高
-		dataQueue:     make(chan *protocol.Message, 4096), // 数据消息大队列
-		sendDone:      make(chan struct{}),
 	}
-
-	// 启动发送协程
-	go clientConn.sendLoop()
 
 	// 注册客户端
 	s.mu.Lock()
@@ -817,24 +790,13 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	s.clientsByName[authReq.ClientName] = clientConn
 	s.mu.Unlock()
 
-	log.Printf("[Server] Client authenticated: %s (ID: %s)", authReq.ClientName, clientID)
+	log.Printf("[Server] Client yamux session established: %s", authReq.ClientName)
 
-	// 发送认证成功响应
-	if err := s.sendAuthResponse(conn, true, "Authentication successful", clientID); err != nil {
-		log.Printf("[Server] Failed to send auth response: %v", err)
-		return
-	}
-
-	// 发送隧道配置
-	if err := s.sendTunnelConfig(conn, clientConfig.Tunnels); err != nil {
-		log.Printf("[Server] Failed to send tunnel config: %v", err)
-		return
-	}
-
-	// 处理客户端消息
-	s.handleClientMessages(clientConn)
+	// 处理控制流消息（心跳等）
+	s.handleControlStream(clientConn)
 
 	// 清理客户端
+	clientConn.Close()
 	s.mu.Lock()
 	delete(s.clients, clientID)
 	if s.clientsByName[authReq.ClientName] == clientConn {
@@ -882,30 +844,24 @@ func (s *Server) sendError(conn net.Conn, code int, message string) {
 	protocol.SendMessage(conn, msg)
 }
 
-// handleClientMessages 处理客户端消息
-func (s *Server) handleClientMessages(client *ClientConn) {
+// handleControlStream 处理控制流消息（心跳、UDP数据等）
+func (s *Server) handleControlStream(client *ClientConn) {
 	for s.running {
-		msg, err := protocol.DecodeMessage(client.Conn)
+		msg, err := protocol.DecodeMessage(client.ControlStream)
 		if err != nil {
-			log.Printf("[Server] Failed to read message from client %s: %v", client.Name, err)
+			log.Printf("[Server] Failed to read control message from client %s: %v", client.Name, err)
 			return
 		}
 
 		switch msg.Type {
 		case protocol.MsgTypeHeartbeat:
 			s.handleHeartbeat(client, msg)
-		case protocol.MsgTypeConnReady:
-			s.handleConnReady(client, msg)
-		case protocol.MsgTypeData:
-			s.handleDataFromClient(client, msg)
-		case protocol.MsgTypeDisconnect:
-			s.handleDisconnectFromClient(client, msg)
 		case protocol.MsgTypeUDPData:
 			s.handleUDPDataFromClient(client, msg)
 		case protocol.MsgTypeClientError:
 			s.handleClientError(client, msg)
 		default:
-			log.Printf("[Server] Unknown message type from client %s: %d", client.Name, msg.Type)
+			log.Printf("[Server] Unknown control message type from client %s: %d", client.Name, msg.Type)
 		}
 	}
 }
@@ -926,84 +882,6 @@ func (s *Server) handleHeartbeat(client *ClientConn, msg *protocol.Message) {
 	client.SendControl(ackMsg)
 }
 
-// handleConnReady 处理连接就绪消息
-func (s *Server) handleConnReady(client *ClientConn, msg *protocol.Message) {
-	cr, err := protocol.ParseConnReady(msg.Payload)
-	if err != nil {
-		log.Printf("[Server] Failed to parse conn ready: %v", err)
-		return
-	}
-
-	s.mu.RLock()
-	proxyConn, exists := s.connections[cr.ConnID]
-	s.mu.RUnlock()
-
-	if !exists {
-		log.Printf("[Server] Connection not found: %s", cr.ConnID)
-		return
-	}
-
-	if !cr.Success {
-		log.Printf("[Server] Client failed to connect to local service: %s", cr.Message)
-		// 发送失败信号
-		select {
-		case proxyConn.Ready <- false:
-		default:
-		}
-		return
-	}
-
-	log.Printf("[Server] Connection ready: %s", cr.ConnID)
-	// 发送就绪信号
-	select {
-	case proxyConn.Ready <- true:
-	default:
-	}
-}
-
-// handleDataFromClient 处理来自客户端的数据
-func (s *Server) handleDataFromClient(client *ClientConn, msg *protocol.Message) {
-	dm, err := protocol.ParseDataMessage(msg.Payload)
-	if err != nil {
-		log.Printf("[Server] Failed to parse data message: %v", err)
-		return
-	}
-
-	s.mu.RLock()
-	proxyConn, exists := s.connections[dm.ConnID]
-	s.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	// 转发数据到外部连接
-	_, err = proxyConn.ExternalConn.Write(dm.Data)
-	if err != nil {
-		log.Printf("[Server] Failed to write to external connection: %v", err)
-		proxyConn.ExternalConn.Close()
-		return
-	}
-
-	// 记录TCP出站（内网->外部）
-	s.metrics.recordTCPOutbound(proxyConn.Tunnel, len(dm.Data))
-}
-
-// handleDisconnectFromClient 处理来自客户端的断开连接消息
-func (s *Server) handleDisconnectFromClient(client *ClientConn, msg *protocol.Message) {
-	dm, err := protocol.ParseDisconnectMessage(msg.Payload)
-	if err != nil {
-		return
-	}
-
-	s.mu.Lock()
-	if proxyConn, exists := s.connections[dm.ConnID]; exists {
-		proxyConn.ExternalConn.Close()
-		delete(s.connections, dm.ConnID)
-	}
-	s.mu.Unlock()
-}
-
 // acceptTunnelConnections 接受隧道连接
 func (s *Server) acceptTunnelConnections(listener net.Listener, tunnel protocol.Tunnel, clientName string) {
 	for s.running {
@@ -1019,8 +897,10 @@ func (s *Server) acceptTunnelConnections(listener net.Listener, tunnel protocol.
 	}
 }
 
-// handleTunnelConnection 处理隧道连接
+// handleTunnelConnection 处理隧道连接（使用yamux stream）
 func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, clientName string) {
+	defer conn.Close()
+
 	// 查找客户端
 	s.mu.RLock()
 	client, exists := s.clientsByName[clientName]
@@ -1028,109 +908,89 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 
 	if !exists {
 		log.Printf("[Server] Client not connected: %s", clientName)
-		conn.Close()
 		return
 	}
 
 	// 生成连接ID（使用原子计数器确保唯一性）
 	connID := fmt.Sprintf("conn-%d-%d", time.Now().Unix(), s.connIDCounter.Add(1))
 
-	// 创建代理连接记录
-	proxyConn := &ProxyConn{
-		ID:           connID,
-		ClientID:     client.ID,
-		TunnelName:   tunnel.Name,
-		ClientPort:   tunnel.ClientPort,
-		ServerPort:   tunnel.ServerPort,
-		Tunnel:       tunnel,
-		ExternalConn: conn,
-		RemoteAddr:   conn.RemoteAddr().String(),
-		CreatedAt:    time.Now(),
-		Ready:        make(chan bool, 1),
-	}
-
-	s.mu.Lock()
-	s.connections[connID] = proxyConn
-	s.mu.Unlock()
-
 	log.Printf("[Server] New connection %s: %s -> tunnel %s", connID, conn.RemoteAddr().String(), tunnel.Name)
 
-	// 通知客户端有新连接
+	// 打开一个新的yamux stream用于此连接
+	stream, err := client.OpenStream()
+	if err != nil {
+		log.Printf("[Server] Failed to open stream for connection %s: %v", connID, err)
+		return
+	}
+	defer stream.Close()
+
+	// 发送连接信息到客户端
 	msg, err := protocol.NewConnectionMessage(connID, tunnel.Name, tunnel.ClientPort, conn.RemoteAddr().String(), tunnel.TargetIP)
 	if err != nil {
 		log.Printf("[Server] Failed to create new connection message: %v", err)
-		conn.Close()
 		return
 	}
 
-	if !client.SendControl(msg) {
-		log.Printf("[Server] Failed to send new connection message: client disconnected")
-		conn.Close()
-		s.mu.Lock()
-		delete(s.connections, connID)
-		s.mu.Unlock()
+	if err := protocol.SendMessage(stream, msg); err != nil {
+		log.Printf("[Server] Failed to send new connection message: %v", err)
 		return
 	}
 
-	// 等待客户端连接就绪
-	select {
-	case ready := <-proxyConn.Ready:
-		if !ready {
-			log.Printf("[Server] Client failed to connect to local service for %s", connID)
-			conn.Close()
-			s.mu.Lock()
-			delete(s.connections, connID)
-			s.mu.Unlock()
-			return
-		}
-	case <-time.After(10 * time.Second):
-		log.Printf("[Server] Timeout waiting for client ready: %s", connID)
-		conn.Close()
-		s.mu.Lock()
-		delete(s.connections, connID)
-		s.mu.Unlock()
+	// 等待客户端就绪响应
+	readyMsg, err := protocol.DecodeMessage(stream)
+	if err != nil {
+		log.Printf("[Server] Failed to receive ready message for %s: %v", connID, err)
 		return
 	}
 
-	// 客户端已就绪，开始读取外部连接数据并转发给客户端
-	s.forwardFromExternal(proxyConn, client)
-}
+	if readyMsg.Type != protocol.MsgTypeConnReady {
+		log.Printf("[Server] Expected conn ready message, got type %d", readyMsg.Type)
+		return
+	}
 
-// forwardFromExternal 从外部连接转发数据到客户端
-func (s *Server) forwardFromExternal(proxyConn *ProxyConn, client *ClientConn) {
-	defer func() {
-		proxyConn.ExternalConn.Close()
-		s.mu.Lock()
-		delete(s.connections, proxyConn.ID)
-		s.mu.Unlock()
+	cr, err := protocol.ParseConnReady(readyMsg.Payload)
+	if err != nil {
+		log.Printf("[Server] Failed to parse conn ready: %v", err)
+		return
+	}
 
-		// 通知客户端断开连接
-		msg, _ := protocol.NewDisconnectMessage(proxyConn.ID, "external connection closed")
-		client.SendControl(msg)
+	if !cr.Success {
+		log.Printf("[Server] Client failed to connect to local service: %s", cr.Message)
+		return
+	}
+
+	log.Printf("[Server] Connection established: %s", connID)
+
+	// 双向数据转发（使用io.Copy，高效且不会阻塞其他连接）
+	done := make(chan struct{}, 2)
+
+	// 从外部连接读取数据，写入stream
+	go func() {
+		n, _ := io.Copy(stream, conn)
+		// 记录TCP入站流量
+		s.metrics.recordTCPInbound(tunnel, int(n))
+		// 关闭stream的写端
+		stream.Close()
+		done <- struct{}{}
 	}()
 
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := proxyConn.ExternalConn.Read(buf)
-		if err != nil {
-			return
+	// 从stream读取数据，写入外部连接
+	go func() {
+		n, _ := io.Copy(conn, stream)
+		// 记录TCP出站流量
+		s.metrics.recordTCPOutbound(tunnel, int(n))
+		// 关闭外部连接的写端
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
 		}
+		done <- struct{}{}
+	}()
 
-		// 发送数据给客户端
-		msg, err := protocol.NewDataMessage(proxyConn.ID, buf[:n])
-		if err != nil {
-			return
-		}
+	// 等待双向传输完成
+	<-done
+	<-done
 
-		if !client.SendDataWithTimeout(msg, 500*time.Millisecond) {
-			// 队列持续拥堵，客户端处理不过来，断开连接
-			log.Printf("[Server] Send queue congested for connection %s, closing", proxyConn.ID)
-			return
-		}
-
-		// 记录TCP入站（外部->内网）
-		s.metrics.recordTCPInbound(proxyConn.Tunnel, n)
-	}
+	log.Printf("[Server] Connection closed: %s", connID)
 }
 
 // GetConfig 获取当前配置

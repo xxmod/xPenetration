@@ -2,10 +2,13 @@ package client
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/hashicorp/yamux"
 
 	"xpenetration/internal/config"
 	"xpenetration/internal/protocol"
@@ -15,130 +18,18 @@ import (
 type Client struct {
 	config        *config.ClientConnConfig
 	conn          net.Conn
+	session       *yamux.Session // yamux多路复用会话
+	controlStream net.Conn       // 控制流（心跳、UDP数据等）
 	clientID      string
 	tunnels       []protocol.Tunnel
-	localConns    map[string]*TCPConnInfo // connID -> local TCP connection info
-	udpConns      map[int]*UDPConnInfo    // clientPort -> UDP connection info
-	nativeUDPConn *net.UDPConn            // 与服务端的原生UDP传输连接
-	serverUDPAddr *net.UDPAddr            // 服务端UDP地址
-	controlQueue  chan *protocol.Message  // 控制消息队列（优先）
-	dataQueue     chan *protocol.Message  // 数据消息队列
-	sendDone      chan struct{}           // 发送协程退出信号
+	udpConns      map[int]*UDPConnInfo // clientPort -> UDP connection info
+	nativeUDPConn *net.UDPConn         // 与服务端的原生UDP传输连接
+	serverUDPAddr *net.UDPAddr         // 服务端UDP地址
 	mu            sync.RWMutex
 	udpMu         sync.RWMutex // UDP专用锁，减少锁竞争
 	running       bool
 	connected     bool
 	stopChan      chan struct{}
-}
-
-// sendLoop 发送循环，优先发送控制消息
-func (c *Client) sendLoop() {
-	for {
-		// 优先控制消息
-		select {
-		case msg, ok := <-c.controlQueue:
-			if !ok {
-				c.controlQueue = nil
-				goto checkExit
-			}
-			c.mu.RLock()
-			conn := c.conn
-			c.mu.RUnlock()
-			if conn != nil {
-				if err := protocol.SendMessage(conn, msg); err != nil {
-					log.Printf("[Client] Failed to send control message: %v", err)
-					goto exit
-				}
-			}
-			continue
-		default:
-		}
-
-		// 数据消息
-		select {
-		case msg, ok := <-c.controlQueue:
-			if ok {
-				c.mu.RLock()
-				conn := c.conn
-				c.mu.RUnlock()
-				if conn != nil {
-					if err := protocol.SendMessage(conn, msg); err != nil {
-						log.Printf("[Client] Failed to send control message: %v", err)
-						goto exit
-					}
-				}
-				continue
-			}
-			c.controlQueue = nil
-		case msg, ok := <-c.dataQueue:
-			if ok {
-				c.mu.RLock()
-				conn := c.conn
-				c.mu.RUnlock()
-				if conn != nil {
-					if err := protocol.SendMessage(conn, msg); err != nil {
-						log.Printf("[Client] Failed to send data message: %v", err)
-						goto exit
-					}
-				}
-				continue
-			}
-			c.dataQueue = nil
-		}
-
-	checkExit:
-		if c.controlQueue == nil && c.dataQueue == nil {
-			break
-		}
-	}
-
-exit:
-	close(c.sendDone)
-}
-
-// sendControl 同步发送控制消息
-func (c *Client) sendControl(msg *protocol.Message) bool {
-	select {
-	case c.controlQueue <- msg:
-		return true
-	case <-c.sendDone:
-		return false
-	}
-}
-
-// sendData 异步发送数据消息，队列满则丢弃
-func (c *Client) sendData(msg *protocol.Message) bool {
-	select {
-	case c.dataQueue <- msg:
-		return true
-	default:
-		return false
-	}
-}
-
-// sendDataWithTimeout 尝试在超时时间内发送数据消息，避免瞬时队列满导致断连
-func (c *Client) sendDataWithTimeout(msg *protocol.Message, timeout time.Duration) bool {
-	if timeout <= 0 {
-		return c.sendData(msg)
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case c.dataQueue <- msg:
-		return true
-	case <-c.sendDone:
-		return false
-	case <-timer.C:
-		return false
-	}
-}
-
-// TCPConnInfo TCP连接信息，支持异步数据处理
-type TCPConnInfo struct {
-	Conn     net.Conn
-	DataChan chan []byte // 数据通道，用于异步发送数据
-	closed   bool
-	mu       sync.Mutex
 }
 
 // UDPConnInfo UDP连接信息
@@ -163,10 +54,9 @@ type UDPSession struct {
 // NewClient 创建新的客户端
 func NewClient(cfg *config.ClientConnConfig) *Client {
 	return &Client{
-		config:     cfg,
-		localConns: make(map[string]*TCPConnInfo),
-		udpConns:   make(map[int]*UDPConnInfo),
-		stopChan:   make(chan struct{}),
+		config:   cfg,
+		udpConns: make(map[int]*UDPConnInfo),
+		stopChan: make(chan struct{}),
 	}
 }
 
@@ -185,14 +75,8 @@ func (c *Client) Start() error {
 			continue
 		}
 
-		// 初始化发送队列（控制/数据分离，控制优先）
-		c.controlQueue = make(chan *protocol.Message, 128)
-		c.dataQueue = make(chan *protocol.Message, 4096)
-		c.sendDone = make(chan struct{})
-		go c.sendLoop()
-
-		// 处理消息
-		c.handleMessages()
+		// 处理控制消息和接受新的stream
+		c.handleSession()
 
 		// 连接断开
 		c.connected = false
@@ -295,6 +179,31 @@ func (c *Client) connect() error {
 		}
 	}
 
+	// 创建yamux客户端会话（客户端作为yamux客户端）
+	yamuxConfig := yamux.DefaultConfig()
+	yamuxConfig.AcceptBacklog = 256
+	yamuxConfig.EnableKeepAlive = true
+	yamuxConfig.KeepAliveInterval = 30 * time.Second
+	yamuxConfig.ConnectionWriteTimeout = 30 * time.Second
+	yamuxConfig.StreamOpenTimeout = 30 * time.Second
+	yamuxConfig.StreamCloseTimeout = 5 * time.Minute
+	yamuxConfig.MaxStreamWindowSize = 16 * 1024 * 1024 // 16MB窗口大小，支持高带宽
+
+	session, err := yamux.Client(conn, yamuxConfig)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to create yamux session: %v", err)
+	}
+	c.session = session
+
+	// 打开控制流（用于心跳、UDP数据等控制消息）
+	controlStream, err := session.Open()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to open control stream: %v", err)
+	}
+	c.controlStream = controlStream
+
 	c.connected = true
 
 	// 检查是否有原生UDP隧道，如果有则启动原生UDP传输
@@ -341,25 +250,46 @@ func (c *Client) sendHeartbeat() {
 	if err != nil {
 		return
 	}
-	c.sendControl(msg)
+	c.mu.RLock()
+	stream := c.controlStream
+	c.mu.RUnlock()
+	if stream != nil {
+		protocol.SendMessage(stream, msg)
+	}
 }
 
-// handleMessages 处理服务端消息
-func (c *Client) handleMessages() {
+// handleSession 处理yamux会话，接受服务端发起的stream
+func (c *Client) handleSession() {
+	// 启动控制流处理协程
+	go c.handleControlStream()
+
+	// 接受服务端发起的数据流（每个外部连接一个stream）
 	for c.running && c.connected {
-		msg, err := protocol.DecodeMessage(c.conn)
+		stream, err := c.session.Accept()
 		if err != nil {
-			log.Printf("[Client] Failed to read message: %v", err)
+			if c.running && c.connected {
+				log.Printf("[Client] Failed to accept stream: %v", err)
+			}
+			return
+		}
+
+		// 为每个新stream启动处理协程
+		go c.handleDataStream(stream)
+	}
+}
+
+// handleControlStream 处理控制流消息（心跳确认、UDP数据等）
+func (c *Client) handleControlStream() {
+	for c.running && c.connected {
+		msg, err := protocol.DecodeMessage(c.controlStream)
+		if err != nil {
+			if c.running && c.connected {
+				log.Printf("[Client] Failed to read control message: %v", err)
+			}
 			return
 		}
 
 		switch msg.Type {
-		case protocol.MsgTypeNewConnection:
-			go c.handleNewConnection(msg)
-		case protocol.MsgTypeData:
-			c.handleData(msg)
-		case protocol.MsgTypeDisconnect:
-			c.handleDisconnect(msg)
 		case protocol.MsgTypeHeartbeatAck:
 			// 心跳确认，忽略
 		case protocol.MsgTypeError:
@@ -367,13 +297,27 @@ func (c *Client) handleMessages() {
 		case protocol.MsgTypeUDPData:
 			go c.handleUDPData(msg)
 		default:
-			log.Printf("[Client] Unknown message type: %d", msg.Type)
+			log.Printf("[Client] Unknown control message type: %d", msg.Type)
 		}
 	}
 }
 
-// handleNewConnection 处理新连接请求
-func (c *Client) handleNewConnection(msg *protocol.Message) {
+// handleDataStream 处理单个数据流（对应一个外部TCP连接）
+func (c *Client) handleDataStream(stream net.Conn) {
+	defer stream.Close()
+
+	// 首先读取连接信息
+	msg, err := protocol.DecodeMessage(stream)
+	if err != nil {
+		log.Printf("[Client] Failed to read connection info: %v", err)
+		return
+	}
+
+	if msg.Type != protocol.MsgTypeNewConnection {
+		log.Printf("[Client] Expected new connection message, got type %d", msg.Type)
+		return
+	}
+
 	nc, err := protocol.ParseNewConnection(msg.Payload)
 	if err != nil {
 		log.Printf("[Client] Failed to parse new connection: %v", err)
@@ -392,179 +336,47 @@ func (c *Client) handleNewConnection(msg *protocol.Message) {
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to connect to local service %s: %v", localAddr, err)
 		log.Printf("[Client] %s", errMsg)
-		c.sendConnReady(nc.ConnID, false, err.Error())
+		// 发送失败响应
+		readyMsg, _ := protocol.NewConnReadyMessage(nc.ConnID, false, err.Error())
+		protocol.SendMessage(stream, readyMsg)
 		c.ReportError("connection", errMsg)
 		return
 	}
-
-	// 创建连接信息，带数据通道
-	connInfo := &TCPConnInfo{
-		Conn:     localConn,
-		DataChan: make(chan []byte, 256), // 缓冲通道，支持异步数据处理
-	}
-
-	// 保存本地连接
-	c.mu.Lock()
-	c.localConns[nc.ConnID] = connInfo
-	c.mu.Unlock()
+	defer localConn.Close()
 
 	// 发送连接就绪消息
-	c.sendConnReady(nc.ConnID, true, "")
-
-	// 启动本地连接数据写入协程（从通道读取数据写入本地）
-	go c.writeToLocal(nc.ConnID, connInfo)
-
-	// 启动本地连接数据读取协程（从本地读取数据发送到服务端）
-	go c.forwardFromLocal(nc.ConnID, connInfo)
-}
-
-// writeToLocal 从数据通道读取数据并写入本地连接
-func (c *Client) writeToLocal(connID string, connInfo *TCPConnInfo) {
-	for data := range connInfo.DataChan {
-		_, err := connInfo.Conn.Write(data)
-		if err != nil {
-			connInfo.mu.Lock()
-			if !connInfo.closed {
-				errMsg := fmt.Sprintf("Failed to write to local connection %s: %v", connID, err)
-				log.Printf("[Client] %s", errMsg)
-				connInfo.closed = true
-				connInfo.Conn.Close()
-			}
-			connInfo.mu.Unlock()
-			// 排空通道
-			for range connInfo.DataChan {
-			}
-			return
-		}
-	}
-}
-
-// sendConnReady 发送连接就绪消息
-func (c *Client) sendConnReady(connID string, success bool, message string) {
-	msg, err := protocol.NewConnReadyMessage(connID, success, message)
-	if err != nil {
+	readyMsg, _ := protocol.NewConnReadyMessage(nc.ConnID, true, "")
+	if err := protocol.SendMessage(stream, readyMsg); err != nil {
+		log.Printf("[Client] Failed to send ready message: %v", err)
 		return
 	}
-	if !c.sendControl(msg) {
-		log.Printf("[Client] Failed to enqueue conn-ready for %s", connID)
-	}
-}
 
-// forwardFromLocal 从本地连接转发数据到服务端
-func (c *Client) forwardFromLocal(connID string, connInfo *TCPConnInfo) {
-	defer func() {
-		// 标记连接已关闭，关闭通道
-		connInfo.mu.Lock()
-		if !connInfo.closed {
-			connInfo.closed = true
-			connInfo.Conn.Close()
+	log.Printf("[Client] Connection established: %s -> %s", nc.ConnID, localAddr)
+
+	// 双向数据转发（使用io.Copy，高效且不会阻塞其他连接）
+	done := make(chan struct{}, 2)
+
+	// 从stream读取数据，写入本地连接
+	go func() {
+		io.Copy(localConn, stream)
+		// 关闭本地连接的写端，通知本地服务数据发送完毕
+		if tcpConn, ok := localConn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
 		}
-		close(connInfo.DataChan)
-		connInfo.mu.Unlock()
-
-		c.mu.Lock()
-		delete(c.localConns, connID)
-		c.mu.Unlock()
-
-		// 通知服务端断开连接
-		c.sendDisconnect(connID, "local connection closed")
+		done <- struct{}{}
 	}()
 
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := connInfo.Conn.Read(buf)
-		if err != nil {
-			return
-		}
+	// 从本地连接读取数据，写入stream
+	go func() {
+		io.Copy(stream, localConn)
+		// 关闭stream的写端
+		stream.Close()
+		done <- struct{}{}
+	}()
 
-		// 发送数据给服务端
-		msg, err := protocol.NewDataMessage(connID, buf[:n])
-		if err != nil {
-			return
-		}
-
-		// 优先尝试带超时的发送，避免瞬时拥塞直接断开
-		if !c.sendDataWithTimeout(msg, 500*time.Millisecond) {
-			log.Printf("[Client] Send queue congested for connection %s, closing", connID)
-			return
-		}
-	}
-}
-
-// sendDisconnect 发送断开连接消息
-func (c *Client) sendDisconnect(connID, reason string) {
-	msg, err := protocol.NewDisconnectMessage(connID, reason)
-	if err != nil {
-		return
-	}
-	c.sendControl(msg)
-}
-
-// handleData 处理服务端发来的数据
-func (c *Client) handleData(msg *protocol.Message) {
-	dm, err := protocol.ParseDataMessage(msg.Payload)
-	if err != nil {
-		log.Printf("[Client] Failed to parse data message: %v", err)
-		return
-	}
-
-	c.mu.RLock()
-	connInfo, exists := c.localConns[dm.ConnID]
-	c.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	// 复制数据并异步发送到通道
-	dataCopy := make([]byte, len(dm.Data))
-	copy(dataCopy, dm.Data)
-
-	// 非阻塞发送到通道
-	connInfo.mu.Lock()
-	if !connInfo.closed {
-		select {
-		case connInfo.DataChan <- dataCopy:
-			// 成功发送
-		default:
-			// 通道已满，同步写入（避免丢数据）
-			connInfo.mu.Unlock()
-			_, err = connInfo.Conn.Write(dataCopy)
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to write to local connection: %v", err)
-				log.Printf("[Client] %s", errMsg)
-				connInfo.mu.Lock()
-				if !connInfo.closed {
-					connInfo.closed = true
-					connInfo.Conn.Close()
-				}
-				connInfo.mu.Unlock()
-				c.ReportError("data_forward", errMsg)
-			}
-			return
-		}
-	}
-	connInfo.mu.Unlock()
-}
-
-// handleDisconnect 处理断开连接消息
-func (c *Client) handleDisconnect(msg *protocol.Message) {
-	dm, err := protocol.ParseDisconnectMessage(msg.Payload)
-	if err != nil {
-		return
-	}
-
-	c.mu.Lock()
-	if connInfo, exists := c.localConns[dm.ConnID]; exists {
-		connInfo.mu.Lock()
-		if !connInfo.closed {
-			connInfo.closed = true
-			connInfo.Conn.Close()
-		}
-		connInfo.mu.Unlock()
-		delete(c.localConns, dm.ConnID)
-	}
-	c.mu.Unlock()
+	// 等待任一方向完成
+	<-done
+	<-done
 }
 
 // handleError 处理错误消息
@@ -870,15 +682,20 @@ func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data 
 	}
 
 	if !useNativeUDP {
-		// TCP封装传输（备用方法或MTU超限回退）
+		// TCP封装传输（备用方法或MTU超限回退）：通过控制流发送
 		msg, err := protocol.NewUDPDataMessage(connInfo.TunnelName, connInfo.ClientPort, remoteAddr, data)
 		if err != nil {
 			log.Printf("[Client] Failed to create UDP response message: %v", err)
 			return
 		}
 
-		if !c.sendDataWithTimeout(msg, 200*time.Millisecond) {
-			log.Printf("[Client] Failed to send UDP response to server: queue congested")
+		c.mu.RLock()
+		stream := c.controlStream
+		c.mu.RUnlock()
+		if stream != nil {
+			if err := protocol.SendMessage(stream, msg); err != nil {
+				log.Printf("[Client] Failed to send UDP response to server: %v", err)
+			}
 		}
 	}
 }
@@ -988,17 +805,6 @@ func (c *Client) cleanup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 关闭所有本地TCP连接
-	for _, connInfo := range c.localConns {
-		connInfo.mu.Lock()
-		if !connInfo.closed {
-			connInfo.closed = true
-			connInfo.Conn.Close()
-		}
-		connInfo.mu.Unlock()
-	}
-	c.localConns = make(map[string]*TCPConnInfo)
-
 	// 关闭所有本地UDP连接和会话
 	c.udpMu.Lock()
 	for _, connInfo := range c.udpConns {
@@ -1019,20 +825,16 @@ func (c *Client) cleanup() {
 	}
 	c.serverUDPAddr = nil
 
-	// 关闭发送队列
-	if c.sendDone != nil {
-		select {
-		case <-c.sendDone:
-			// 已经关闭
-		default:
-			if c.controlQueue != nil {
-				close(c.controlQueue)
-			}
-			if c.dataQueue != nil {
-				close(c.dataQueue)
-			}
-			<-c.sendDone // 等待发送协程退出
-		}
+	// 关闭控制流
+	if c.controlStream != nil {
+		c.controlStream.Close()
+		c.controlStream = nil
+	}
+
+	// 关闭yamux会话（会自动关闭所有stream）
+	if c.session != nil {
+		c.session.Close()
+		c.session = nil
 	}
 
 	// 关闭服务端连接
@@ -1066,7 +868,12 @@ func (c *Client) GetClientID() string {
 
 // ReportError 上报错误到服务端
 func (c *Client) ReportError(errorType, message string) {
-	if !c.connected || c.conn == nil {
+	c.mu.RLock()
+	stream := c.controlStream
+	connected := c.connected
+	c.mu.RUnlock()
+
+	if !connected || stream == nil {
 		return
 	}
 
@@ -1080,5 +887,5 @@ func (c *Client) ReportError(errorType, message string) {
 		log.Printf("[Client] Failed to create error report: %v", err)
 		return
 	}
-	c.sendControl(msg)
+	protocol.SendMessage(stream, msg)
 }
