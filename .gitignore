@@ -20,6 +20,9 @@ logs/
 configs/server.yaml
 configs/client.yaml
 
+# AI agent instructions (local)
+.github/copilot-instructions.md
+
 # Keep example configs
 !configs/server.example.yaml
 !configs/client.example.yaml

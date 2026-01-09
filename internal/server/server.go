@@ -167,6 +167,7 @@ type UDPListener struct {
 type UDPRemoteAddrEntry struct {
 	Addr     *net.UDPAddr
 	LastSeen time.Time
+	ConnID   string
 }
 
 // ClientConn 客户端连接信息
@@ -231,6 +232,31 @@ type ProxyConn struct {
 	RemoteAddr   string
 	CreatedAt    time.Time
 	Ready        chan bool // 等待客户端连接就绪
+	Protocol     string
+	LastSeen     time.Time
+}
+
+// addConnection registers a new active connection for Web/API visibility.
+func (s *Server) addConnection(pc *ProxyConn) {
+	s.mu.Lock()
+	s.connections[pc.ID] = pc
+	s.mu.Unlock()
+}
+
+// updateConnectionLastSeen refreshes the timestamp of an active connection.
+func (s *Server) updateConnectionLastSeen(id string) {
+	s.mu.Lock()
+	if pc, ok := s.connections[id]; ok {
+		pc.LastSeen = time.Now()
+	}
+	s.mu.Unlock()
+}
+
+// removeConnection deletes an active connection entry.
+func (s *Server) removeConnection(id string) {
+	s.mu.Lock()
+	delete(s.connections, id)
+	s.mu.Unlock()
 }
 
 // NewServer 创建新的服务端
@@ -401,14 +427,19 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 		s.mu.Unlock()
 
 		// 查找原始请求的远程地址
-		udpListener.mu.RLock()
+		udpListener.mu.Lock()
 		entry, exists := udpListener.remoteAddrs[pkt.RemoteAddr]
-		udpListener.mu.RUnlock()
+		if exists {
+			entry.LastSeen = time.Now()
+		}
+		udpListener.mu.Unlock()
 
 		if !exists {
 			log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
 			return
 		}
+
+		s.updateConnectionLastSeen(entry.ConnID)
 
 		// 发送响应给外部客户端
 		_, err = udpListener.Conn.WriteToUDP(pkt.Data, entry.Addr)
@@ -498,13 +529,18 @@ func (s *Server) cleanupRemoteAddrs(udpListener *UDPListener) {
 		select {
 		case <-ticker.C:
 			now := time.Now()
+			staleIDs := make([]string, 0)
 			udpListener.mu.Lock()
 			for addr, entry := range udpListener.remoteAddrs {
 				if now.Sub(entry.LastSeen) > protocol.UDPRemoteAddrExpiry {
+					staleIDs = append(staleIDs, entry.ConnID)
 					delete(udpListener.remoteAddrs, addr)
 				}
 			}
 			udpListener.mu.Unlock()
+			for _, id := range staleIDs {
+				s.removeConnection(id)
+			}
 		case <-udpListener.stopCleanup:
 			return
 		case <-s.stopChan:
@@ -546,15 +582,7 @@ func (s *Server) handleUDPTunnel(udpListener *UDPListener) {
 func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, remoteAddr *net.UDPAddr, udpMode string) {
 	// 保存远程地址用于响应（带时间戳）
 	remoteAddrStr := remoteAddr.String()
-	udpListener.mu.Lock()
-	udpListener.remoteAddrs[remoteAddrStr] = &UDPRemoteAddrEntry{
-		Addr:     remoteAddr,
-		LastSeen: time.Now(),
-	}
-	udpListener.mu.Unlock()
-
-	// 记录入口指标（外部 -> 服务端）
-	s.metrics.recordUDPInbound(udpListener.Tunnel, len(data))
+	clientID := ""
 
 	// 查找客户端
 	s.mu.RLock()
@@ -566,6 +594,37 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 		log.Printf("[Server] UDP: Client not connected: %s", udpListener.ClientName)
 		return
 	}
+	clientID = client.ID
+
+	udpListener.mu.Lock()
+	if entry, ok := udpListener.remoteAddrs[remoteAddrStr]; ok {
+		entry.LastSeen = time.Now()
+		udpListener.mu.Unlock()
+		s.updateConnectionLastSeen(entry.ConnID)
+	} else {
+		connID := fmt.Sprintf("udp-%s-%d-%s", udpListener.ClientName, udpListener.Tunnel.ServerPort, remoteAddrStr)
+		udpListener.remoteAddrs[remoteAddrStr] = &UDPRemoteAddrEntry{
+			Addr:     remoteAddr,
+			LastSeen: time.Now(),
+			ConnID:   connID,
+		}
+		udpListener.mu.Unlock()
+		s.addConnection(&ProxyConn{
+			ID:         connID,
+			ClientID:   clientID,
+			TunnelName: udpListener.Tunnel.Name,
+			ClientPort: udpListener.Tunnel.ClientPort,
+			ServerPort: udpListener.Tunnel.ServerPort,
+			Tunnel:     udpListener.Tunnel,
+			RemoteAddr: remoteAddrStr,
+			CreatedAt:  time.Now(),
+			LastSeen:   time.Now(),
+			Protocol:   "udp",
+		})
+	}
+
+	// 记录入口指标（外部 -> 服务端）
+	s.metrics.recordUDPInbound(udpListener.Tunnel, len(data))
 
 	// 根据udp_mode选择传输方式
 	// 计算编码后的数据包大小，检查是否超过MTU
@@ -634,14 +693,19 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 	}
 
 	// 获取远程地址
-	udpListener.mu.RLock()
+	udpListener.mu.Lock()
 	entry, exists := udpListener.remoteAddrs[udm.RemoteAddr]
-	udpListener.mu.RUnlock()
+	if exists {
+		entry.LastSeen = time.Now()
+	}
+	udpListener.mu.Unlock()
 
 	if !exists {
 		log.Printf("[Server] Remote address not found: %s", udm.RemoteAddr)
 		return
 	}
+
+	s.updateConnectionLastSeen(entry.ConnID)
 
 	// 发送UDP响应
 	_, err = udpListener.Conn.WriteToUDP(udm.Data, entry.Addr)
@@ -960,6 +1024,22 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 	}
 
 	log.Printf("[Server] Connection established: %s", connID)
+
+	// 注册活跃连接，便于Web查看
+	s.addConnection(&ProxyConn{
+		ID:           connID,
+		ClientID:     client.ID,
+		TunnelName:   tunnel.Name,
+		ClientPort:   tunnel.ClientPort,
+		ServerPort:   tunnel.ServerPort,
+		Tunnel:       tunnel,
+		ExternalConn: conn,
+		RemoteAddr:   conn.RemoteAddr().String(),
+		CreatedAt:    time.Now(),
+		LastSeen:     time.Now(),
+		Protocol:     "tcp",
+	})
+	defer s.removeConnection(connID)
 
 	// 双向数据转发（使用io.Copy，高效且不会阻塞其他连接）
 	done := make(chan struct{}, 2)

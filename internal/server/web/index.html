@@ -528,7 +528,7 @@
             mounted() {
                 this.fetchData();
                 this.fetchConfig();
-                this.timer = setInterval(this.fetchData, 3000);
+                this.timer = setInterval(this.fetchData, 1000);
             },
             beforeUnmount() {
                 if (this.timer) clearInterval(this.timer);
