@@ -1212,7 +1212,9 @@ func (s *Server) Stop() {
 
 	// 关闭所有代理连接
 	for _, conn := range s.connections {
-		conn.ExternalConn.Close()
+		if conn != nil && conn.ExternalConn != nil {
+			conn.ExternalConn.Close()
+		}
 	}
 	// 清空连接map
 	s.connections = make(map[string]*ProxyConn)
