@@ -12,24 +12,27 @@ import (
 
 	"xpenetration/internal/config"
 	"xpenetration/internal/protocol"
+	"xpenetration/internal/secure"
 )
 
 // Client 客户端结构
 type Client struct {
-	config        *config.ClientConnConfig
-	conn          net.Conn
-	session       *yamux.Session // yamux多路复用会话
-	controlStream net.Conn       // 控制流（心跳、UDP数据等）
-	clientID      string
-	tunnels       []protocol.Tunnel
-	udpConns      map[int]*UDPConnInfo // clientPort -> UDP connection info
-	nativeUDPConn *net.UDPConn         // 与服务端的原生UDP传输连接
-	serverUDPAddr *net.UDPAddr         // 服务端UDP地址
-	mu            sync.RWMutex
-	udpMu         sync.RWMutex // UDP专用锁，减少锁竞争
-	running       bool
-	connected     bool
-	stopChan      chan struct{}
+	config            *config.ClientConnConfig
+	conn              net.Conn
+	session           *yamux.Session // yamux多路复用会话
+	controlStream     net.Conn       // 控制流（心跳、UDP数据等）
+	clientID          string
+	tunnels           []protocol.Tunnel
+	udpConns          map[int]*UDPConnInfo // clientPort -> UDP connection info
+	nativeUDPConn     *net.UDPConn         // 与服务端的原生UDP传输连接
+	serverUDPAddr     *net.UDPAddr         // 服务端UDP地址
+	encryptionEnabled bool
+	encryptionKey     []byte
+	mu                sync.RWMutex
+	udpMu             sync.RWMutex // UDP专用锁，减少锁竞争
+	running           bool
+	connected         bool
+	stopChan          chan struct{}
 }
 
 // UDPConnInfo UDP连接信息
@@ -146,6 +149,11 @@ func (c *Client) connect() error {
 	}
 
 	c.clientID = authResp.ClientID
+	c.encryptionEnabled = authResp.EncryptionEnabled
+	c.encryptionKey = secure.DeriveKey(c.config.Client.SecretKey)
+	if c.encryptionEnabled {
+		log.Printf("[Client] Payload encryption enabled")
+	}
 	log.Printf("[Client] Authentication successful, client ID: %s", c.clientID)
 
 	// 接收隧道配置
@@ -353,12 +361,22 @@ func (c *Client) handleDataStream(stream net.Conn) {
 
 	log.Printf("[Client] Connection established: %s -> %s", nc.ConnID, localAddr)
 
+	securedStream := stream
+	if c.encryptionEnabled {
+		wrapped, err := secure.WrapConn(stream, c.encryptionKey)
+		if err != nil {
+			log.Printf("[Client] Failed to enable encryption for %s: %v", nc.ConnID, err)
+			return
+		}
+		securedStream = wrapped
+	}
+
 	// 双向数据转发（使用io.Copy，高效且不会阻塞其他连接）
 	done := make(chan struct{}, 2)
 
 	// 从stream读取数据，写入本地连接
 	go func() {
-		io.Copy(localConn, stream)
+		io.Copy(localConn, securedStream)
 		// 关闭本地连接的写端，通知本地服务数据发送完毕
 		if tcpConn, ok := localConn.(*net.TCPConn); ok {
 			tcpConn.CloseWrite()
@@ -368,9 +386,9 @@ func (c *Client) handleDataStream(stream net.Conn) {
 
 	// 从本地连接读取数据，写入stream
 	go func() {
-		io.Copy(stream, localConn)
+		io.Copy(securedStream, localConn)
 		// 关闭stream的写端
-		stream.Close()
+		securedStream.Close()
 		done <- struct{}{}
 	}()
 
@@ -559,6 +577,16 @@ func (c *Client) handleNativeUDPData(pkt *protocol.NativeUDPPacket) {
 		c.udpMu.Unlock()
 	}
 
+	data := pkt.Data
+	if c.encryptionEnabled {
+		plain, err := secure.DecryptBytes(pkt.Data, c.encryptionKey)
+		if err != nil {
+			log.Printf("[Client] Failed to decrypt native UDP payload: %v", err)
+			return
+		}
+		data = plain
+	}
+
 	// 获取或创建此远程地址对应的会话
 	session := c.getOrCreateUDPSession(connInfo, pkt.RemoteAddr)
 	if session == nil {
@@ -566,7 +594,7 @@ func (c *Client) handleNativeUDPData(pkt *protocol.NativeUDPPacket) {
 	}
 
 	// 发送数据到本地UDP服务
-	_, err := session.Conn.Write(pkt.Data)
+	_, err := session.Conn.Write(data)
 	if err != nil {
 		log.Printf("[Client] Failed to write native UDP data to local service: %v", err)
 	}
@@ -658,12 +686,22 @@ func (c *Client) forwardUDPSessionResponse(connInfo *UDPConnInfo, session *UDPSe
 
 // sendUDPResponse 发送UDP响应到服务端
 func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data []byte) {
+	payload := data
+	if c.encryptionEnabled {
+		encrypted, err := secure.EncryptBytes(data, c.encryptionKey)
+		if err != nil {
+			log.Printf("[Client] Failed to encrypt UDP payload: %v", err)
+			return
+		}
+		payload = encrypted
+	}
+
 	// 根据UDP模式选择发送方式
 	pktData := protocol.EncodeNativeUDPDataPacket(
 		connInfo.ServerPort,
 		connInfo.ClientPort,
 		remoteAddr,
-		data,
+		payload,
 	)
 	useNativeUDP := connInfo.UDPMode == protocol.UDPModeNative && c.nativeUDPConn != nil && c.serverUDPAddr != nil
 	// 如果数据包超过安全MTU大小，自动回退到TCP传输
@@ -683,7 +721,7 @@ func (c *Client) sendUDPResponse(connInfo *UDPConnInfo, remoteAddr string, data 
 
 	if !useNativeUDP {
 		// TCP封装传输（备用方法或MTU超限回退）：通过控制流发送
-		msg, err := protocol.NewUDPDataMessage(connInfo.TunnelName, connInfo.ClientPort, remoteAddr, data)
+		msg, err := protocol.NewUDPDataMessage(connInfo.TunnelName, connInfo.ClientPort, remoteAddr, payload)
 		if err != nil {
 			log.Printf("[Client] Failed to create UDP response message: %v", err)
 			return
@@ -733,6 +771,16 @@ func (c *Client) handleUDPData(msg *protocol.Message) {
 	if err != nil {
 		log.Printf("[Client] Failed to parse UDP data message: %v", err)
 		return
+	}
+
+	data := udm.Data
+	if c.encryptionEnabled {
+		plain, err := secure.DecryptBytes(udm.Data, c.encryptionKey)
+		if err != nil {
+			log.Printf("[Client] Failed to decrypt UDP payload: %v", err)
+			return
+		}
+		data = plain
 	}
 
 	// 获取或创建隧道的UDP连接管理器
@@ -794,7 +842,7 @@ func (c *Client) handleUDPData(msg *protocol.Message) {
 	}
 
 	// 发送数据到本地UDP服务
-	_, err = session.Conn.Write(udm.Data)
+	_, err = session.Conn.Write(data)
 	if err != nil {
 		log.Printf("[Client] Failed to write UDP data to local service: %v", err)
 	}

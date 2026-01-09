@@ -17,12 +17,18 @@ type ServerConfig struct {
 
 // ServerSettings 服务端设置
 type ServerSettings struct {
-	ListenAddr  string   `yaml:"listen_addr" json:"listen_addr"`   // 监听地址
-	ControlPort int      `yaml:"control_port" json:"control_port"` // 控制端口
-	UDPPort     int      `yaml:"udp_port" json:"udp_port"`         // UDP数据传输端口（用于原生UDP隧道）
-	WebPort     int      `yaml:"web_port" json:"web_port"`         // Web管理端口
-	SecretKey   string   `yaml:"secret_key" json:"secret_key"`     // 全局密钥
-	WebAuth     *WebAuth `yaml:"web_auth" json:"web_auth"`         // Web管理界面Basic Auth（可选）
+	ListenAddr  string             `yaml:"listen_addr" json:"listen_addr"`   // 监听地址
+	ControlPort int                `yaml:"control_port" json:"control_port"` // 控制端口
+	UDPPort     int                `yaml:"udp_port" json:"udp_port"`         // UDP数据传输端口（用于原生UDP隧道）
+	WebPort     int                `yaml:"web_port" json:"web_port"`         // Web管理端口
+	SecretKey   string             `yaml:"secret_key" json:"secret_key"`     // 全局密钥
+	WebAuth     *WebAuth           `yaml:"web_auth" json:"web_auth"`         // Web管理界面Basic Auth（可选）
+	Encryption  EncryptionSettings `yaml:"encryption" json:"encryption"`     // 传输加密设置
+}
+
+// EncryptionSettings 传输加密配置
+type EncryptionSettings struct {
+	Enabled bool `yaml:"enabled" json:"enabled"` // 是否启用端到端加密
 }
 
 // WebAuth Web管理界面认证配置

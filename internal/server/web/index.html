@@ -372,6 +372,12 @@
                                 <input type="text" class="form-control" v-model="config.server.secret_key">
                                 <div class="form-text">所有未配置专属密钥的客户端将使用此密钥验证</div>
                             </div>
+
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="encryptionSwitch" v-model="config.server.encryption.enabled">
+                                <label class="form-check-label" for="encryptionSwitch">启用隧道传输加密</label>
+                                <div class="form-text">使用 ChaCha20-Poly1305 对 TCP/UDP 隧道流量进行对称加密（性能要求较高）</div>
+                            </div>
                             
                             <hr>
                             <h5 class="mb-3"><i class="bi bi-shield-lock me-2"></i>Web管理界面认证 (Basic Auth)</h5>
@@ -499,7 +505,7 @@
                     lastMetricsAt: null,
                     connections: [],
                     config: {
-                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null },
+                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null, encryption: { enabled: false } },
                         clients: [],
                         log: { level: 'info', output: 'stdout' }
                     },
@@ -576,6 +582,9 @@
                         } else {
                             this.webAuthUsername = '';
                             this.webAuthPassword = '';
+                        }
+                        if (!this.config.server.encryption) {
+                            this.config.server.encryption = { enabled: false };
                         }
                     } catch (e) {
                         console.error('Failed to fetch config', e);

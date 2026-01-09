@@ -17,6 +17,7 @@ import (
 
 	"xpenetration/internal/config"
 	"xpenetration/internal/protocol"
+	"xpenetration/internal/secure"
 )
 
 // LogWriter 自定义日志写入器，同时输出到控制台和收集到内存
@@ -172,15 +173,17 @@ type UDPRemoteAddrEntry struct {
 
 // ClientConn 客户端连接信息
 type ClientConn struct {
-	ID            string
-	Name          string
-	Conn          net.Conn
-	Session       *yamux.Session // yamux多路复用会话
-	ControlStream net.Conn       // 控制流（心跳、UDP数据等）
-	Tunnels       []protocol.Tunnel
-	ConnectedAt   time.Time
-	LastHeartbeat time.Time
-	mu            sync.Mutex // 用于一般操作
+	ID                string
+	Name              string
+	Conn              net.Conn
+	Session           *yamux.Session // yamux多路复用会话
+	ControlStream     net.Conn       // 控制流（心跳、UDP数据等）
+	Tunnels           []protocol.Tunnel
+	ConnectedAt       time.Time
+	LastHeartbeat     time.Time
+	EncryptionEnabled bool
+	EncryptionKey     []byte
+	mu                sync.Mutex // 用于一般操作
 }
 
 // SendControl 发送控制消息到控制流
@@ -413,18 +416,20 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 
 		// 查找对应的UDP监听器
 		s.mu.RLock()
-		udpListener, exists := s.udpListeners[pkt.ServerPort]
+		udpListener, ok := s.udpListeners[pkt.ServerPort]
 		s.mu.RUnlock()
-
-		if !exists {
-			log.Printf("[Server] UDP listener not found for server port: %d", pkt.ServerPort)
+		if !ok || udpListener == nil {
+			log.Printf("[Server] UDP listener not found for port: %d", pkt.ServerPort)
 			return
 		}
 
-		// 更新客户端的UDP地址（用于发送响应）
-		s.mu.Lock()
-		s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
-		s.mu.Unlock()
+		s.mu.RLock()
+		clientConn := s.clientsByName[udpListener.ClientName]
+		s.mu.RUnlock()
+		if clientConn == nil {
+			log.Printf("[Server] UDP listener client not connected: %s", udpListener.ClientName)
+			return
+		}
 
 		// 查找原始请求的远程地址
 		udpListener.mu.Lock()
@@ -433,6 +438,10 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 			entry.LastSeen = time.Now()
 		}
 		udpListener.mu.Unlock()
+		// 更新客户端的UDP地址（用于发送响应）
+		s.mu.Lock()
+		s.clientUDPAddrs[udpListener.ClientName] = clientUDPAddr
+		s.mu.Unlock()
 
 		if !exists {
 			log.Printf("[Server] Remote address not found: %s", pkt.RemoteAddr)
@@ -441,12 +450,22 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 
 		s.updateConnectionLastSeen(entry.ConnID)
 
+		payload := pkt.Data
+		if clientConn.EncryptionEnabled {
+			plain, err := secure.DecryptBytes(pkt.Data, clientConn.EncryptionKey)
+			if err != nil {
+				log.Printf("[Server] Failed to decrypt UDP payload: %v", err)
+				return
+			}
+			payload = plain
+		}
+
 		// 发送响应给外部客户端
-		_, err = udpListener.Conn.WriteToUDP(pkt.Data, entry.Addr)
+		_, err = udpListener.Conn.WriteToUDP(payload, entry.Addr)
 		if err != nil {
 			log.Printf("[Server] Failed to send UDP response to external client: %v", err)
 		} else {
-			s.metrics.recordUDPOutbound(udpListener.Tunnel, len(pkt.Data), false)
+			s.metrics.recordUDPOutbound(udpListener.Tunnel, len(payload), false)
 		}
 	}
 }
@@ -626,13 +645,23 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 	// 记录入口指标（外部 -> 服务端）
 	s.metrics.recordUDPInbound(udpListener.Tunnel, len(data))
 
+	payload := data
+	if client.EncryptionEnabled {
+		encrypted, err := secure.EncryptBytes(data, client.EncryptionKey)
+		if err != nil {
+			log.Printf("[Server] Failed to encrypt UDP payload: %v", err)
+			return
+		}
+		payload = encrypted
+	}
+
 	// 根据udp_mode选择传输方式
 	// 计算编码后的数据包大小，检查是否超过MTU
 	pktData := protocol.EncodeNativeUDPDataPacket(
 		udpListener.Tunnel.ServerPort,
 		udpListener.Tunnel.ClientPort,
 		remoteAddrStr,
-		data,
+		payload,
 	)
 	useNativeUDP := udpMode == protocol.UDPModeNative && s.nativeUDPConn != nil && clientUDPAddr != nil
 	// 如果数据包超过安全MTU大小，自动回退到TCP传输
@@ -655,7 +684,7 @@ func (s *Server) processUDPTunnelPacket(udpListener *UDPListener, data []byte, r
 			udpListener.Tunnel.Name,
 			udpListener.Tunnel.ClientPort,
 			remoteAddrStr,
-			data,
+			payload,
 		)
 		if err != nil {
 			log.Printf("[Server] Failed to create UDP data message: %v", err)
@@ -674,6 +703,16 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 	if err != nil {
 		log.Printf("[Server] Failed to parse UDP data message: %v", err)
 		return
+	}
+
+	payload := udm.Data
+	if client.EncryptionEnabled {
+		plain, err := secure.DecryptBytes(udm.Data, client.EncryptionKey)
+		if err != nil {
+			log.Printf("[Server] Failed to decrypt UDP payload: %v", err)
+			return
+		}
+		payload = plain
 	}
 
 	// 查找对应的UDP监听器
@@ -708,12 +747,12 @@ func (s *Server) handleUDPDataFromClient(client *ClientConn, msg *protocol.Messa
 	s.updateConnectionLastSeen(entry.ConnID)
 
 	// 发送UDP响应
-	_, err = udpListener.Conn.WriteToUDP(udm.Data, entry.Addr)
+	_, err = udpListener.Conn.WriteToUDP(payload, entry.Addr)
 	if err != nil {
 		log.Printf("[Server] Failed to send UDP response: %v", err)
 	} else {
 		// 该数据通过TCP回退通道抵达，视为一次回退发送
-		s.metrics.recordUDPOutbound(udpListener.Tunnel, len(udm.Data), true)
+		s.metrics.recordUDPOutbound(udpListener.Tunnel, len(payload), true)
 	}
 }
 
@@ -765,7 +804,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	clientConfig := s.findClientConfig(authReq.ClientName)
 	if clientConfig == nil {
 		log.Printf("[Server] Unknown client: %s", authReq.ClientName)
-		s.sendAuthResponse(conn, false, "Unknown client", "")
+		s.sendAuthResponse(conn, false, "Unknown client", "", false)
 		conn.Close()
 		return
 	}
@@ -778,7 +817,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 
 	if authReq.SecretKey != expectedKey {
 		log.Printf("[Server] Invalid secret key from client: %s", authReq.ClientName)
-		s.sendAuthResponse(conn, false, "Invalid secret key", "")
+		s.sendAuthResponse(conn, false, "Invalid secret key", "", false)
 		conn.Close()
 		return
 	}
@@ -791,8 +830,10 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 
 	log.Printf("[Server] Client authenticated: %s (ID: %s)", authReq.ClientName, clientID)
 
+	encryptionEnabled := s.config.Server.Encryption.Enabled
+
 	// 发送认证成功响应
-	if err := s.sendAuthResponse(conn, true, "Authentication successful", clientID); err != nil {
+	if err := s.sendAuthResponse(conn, true, "Authentication successful", clientID, encryptionEnabled); err != nil {
 		log.Printf("[Server] Failed to send auth response: %v", err)
 		conn.Close()
 		return
@@ -830,16 +871,20 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		return
 	}
 
+	encryptionKey := secure.DeriveKey(expectedKey)
+
 	// 创建客户端连接记录
 	clientConn := &ClientConn{
-		ID:            clientID,
-		Name:          authReq.ClientName,
-		Conn:          conn,
-		Session:       session,
-		ControlStream: controlStream,
-		Tunnels:       clientConfig.Tunnels,
-		ConnectedAt:   time.Now(),
-		LastHeartbeat: time.Now(),
+		ID:                clientID,
+		Name:              authReq.ClientName,
+		Conn:              conn,
+		Session:           session,
+		ControlStream:     controlStream,
+		Tunnels:           clientConfig.Tunnels,
+		ConnectedAt:       time.Now(),
+		LastHeartbeat:     time.Now(),
+		EncryptionEnabled: encryptionEnabled,
+		EncryptionKey:     encryptionKey,
 	}
 
 	// 注册客户端
@@ -882,8 +927,8 @@ func (s *Server) findClientConfig(clientName string) *config.ClientSettings {
 }
 
 // sendAuthResponse 发送认证响应
-func (s *Server) sendAuthResponse(conn net.Conn, success bool, message, clientID string) error {
-	msg, err := protocol.NewAuthResponse(success, message, clientID)
+func (s *Server) sendAuthResponse(conn net.Conn, success bool, message, clientID string, encryptionEnabled bool) error {
+	msg, err := protocol.NewAuthResponse(success, message, clientID, encryptionEnabled)
 	if err != nil {
 		return err
 	}
@@ -1025,6 +1070,17 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 
 	log.Printf("[Server] Connection established: %s", connID)
 
+	// 在数据转发前包装加密流（可选）
+	securedStream := stream
+	if client.EncryptionEnabled {
+		wrapped, err := secure.WrapConn(stream, client.EncryptionKey)
+		if err != nil {
+			log.Printf("[Server] Failed to enable encryption for %s: %v", connID, err)
+			return
+		}
+		securedStream = wrapped
+	}
+
 	// 注册活跃连接，便于Web查看
 	s.addConnection(&ProxyConn{
 		ID:           connID,
@@ -1046,17 +1102,17 @@ func (s *Server) handleTunnelConnection(conn net.Conn, tunnel protocol.Tunnel, c
 
 	// 从外部连接读取数据，写入stream
 	go func() {
-		n, _ := io.Copy(stream, conn)
+		n, _ := io.Copy(securedStream, conn)
 		// 记录TCP入站流量
 		s.metrics.recordTCPInbound(tunnel, int(n))
 		// 关闭stream的写端
-		stream.Close()
+		securedStream.Close()
 		done <- struct{}{}
 	}()
 
 	// 从stream读取数据，写入外部连接
 	go func() {
-		n, _ := io.Copy(conn, stream)
+		n, _ := io.Copy(conn, securedStream)
 		// 记录TCP出站流量
 		s.metrics.recordTCPOutbound(tunnel, int(n))
 		// 关闭外部连接的写端

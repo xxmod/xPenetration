@@ -47,7 +47,7 @@ const (
 // UDP NAT保活常量
 const (
 	UDPKeepaliveInterval = 30 * time.Second // UDP NAT保活间隔（30秒）
-	UDPRemoteAddrExpiry  = 5 * time.Minute  // UDP远程地址过期时间（5分钟）
+	UDPRemoteAddrExpiry  = 1 * time.Minute  // UDP远程地址过期时间（1分钟）
 	UDPCleanupInterval   = 1 * time.Minute  // UDP地址清理间隔（1分钟）
 )
 
@@ -83,6 +83,8 @@ type AuthResponse struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
 	ClientID string `json:"client_id"`
+	// EncryptionEnabled indicates whether payload encryption is enabled for this session.
+	EncryptionEnabled bool `json:"encryption_enabled,omitempty"`
 }
 
 // TunnelConfig 隧道配置
@@ -291,11 +293,12 @@ func NewAuthRequest(secretKey, clientName string) (*Message, error) {
 }
 
 // NewAuthResponse 创建认证响应消息
-func NewAuthResponse(success bool, message, clientID string) (*Message, error) {
+func NewAuthResponse(success bool, message, clientID string, encryptionEnabled bool) (*Message, error) {
 	resp := AuthResponse{
-		Success:  success,
-		Message:  message,
-		ClientID: clientID,
+		Success:           success,
+		Message:           message,
+		ClientID:          clientID,
+		EncryptionEnabled: encryptionEnabled,
 	}
 	payload, err := json.Marshal(resp)
 	if err != nil {

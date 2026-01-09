@@ -56,7 +56,9 @@ func main() {
 				Server: config.ServerSettings{
 					ListenAddr:  "0.0.0.0",
 					ControlPort: 7000,
+					UDPPort:     7001,
 					WebPort:     7500,
+					Encryption:  config.EncryptionSettings{Enabled: false},
 				},
 				Log: config.LogSettings{
 					Level:  "info",

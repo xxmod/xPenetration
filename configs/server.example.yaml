@@ -9,6 +9,9 @@ server:
   udp_port: 7001
   # Web管理界面端口
   web_port: 7500
+  # 传输加密开关（对TCP与UDP隧道数据加密）
+  encryption:
+    enabled: true
   # 全局密钥（客户端验证用）
   secret_key: "your-secret-key-change-me"
   # Web管理界面认证（Basic Auth，可选）
