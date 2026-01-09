@@ -2,11 +2,10 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
       - 'v*'
+    paths:
+      - '.env'
 
 permissions:
   contents: write
