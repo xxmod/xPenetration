@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,7 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"xpenetration/internal/config"
 )
 
@@ -30,6 +32,8 @@ type WebServer struct {
 	configPath string
 	mu         sync.Mutex
 	httpServer *http.Server
+	redirect   *http.Server
+	listener   net.Listener
 }
 
 // NewWebServer 创建Web服务器
@@ -303,7 +307,11 @@ func (ws *WebServer) Restart(cfg *config.ServerConfig) {
 func (ws *WebServer) Stop() {
 	ws.mu.Lock()
 	srv := ws.httpServer
+	redir := ws.redirect
+	ln := ws.listener
 	ws.httpServer = nil
+	ws.redirect = nil
+	ws.listener = nil
 	ws.mu.Unlock()
 	if srv == nil {
 		return
@@ -312,6 +320,12 @@ func (ws *WebServer) Stop() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
 		log.Printf("[WebServer] Shutdown error: %v", err)
+	}
+	if redir != nil {
+		redir.Shutdown(ctx)
+	}
+	if ln != nil {
+		ln.Close()
 	}
 }
 
@@ -325,22 +339,36 @@ func (ws *WebServer) startWithConfig(cfg *config.ServerConfig) error {
 
 	ws.mu.Lock()
 	ws.addr = addr
-	ws.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: handler,
-	}
+	ws.httpServer = &http.Server{Addr: addr, Handler: handler}
+	ws.redirect = nil
+	ws.listener = nil
 	ws.mu.Unlock()
 
 	if cfg.Server.WebTLS != nil && cfg.Server.WebTLS.Enabled {
 		certFile := strings.TrimSpace(cfg.Server.WebTLS.CertFile)
 		keyFile := strings.TrimSpace(cfg.Server.WebTLS.KeyFile)
 		if certFile != "" && keyFile != "" {
-			log.Printf("[WebServer] Starting on https://%s (TLS)", addr)
-			err := ws.httpServer.ListenAndServeTLS(certFile, keyFile)
-			if err == http.ErrServerClosed {
-				return nil
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				return err
 			}
-			return err
+			ws.mu.Lock()
+			ws.listener = ln
+			// Redirect server (plain HTTP -> HTTPS)
+			ws.redirect = &http.Server{
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					target := "https://" + r.Host + r.URL.RequestURI()
+					http.Redirect(w, r, target, http.StatusMovedPermanently)
+				}),
+			}
+			ws.mu.Unlock()
+
+			tlsCfg, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				ln.Close()
+				return err
+			}
+			return ws.serveTLSWithRedirect(ln, &tlsCfg, handler)
 		}
 		log.Printf("[WebServer] TLS enabled but cert/key missing, fallback to HTTP")
 	}
@@ -351,6 +379,84 @@ func (ws *WebServer) startWithConfig(cfg *config.ServerConfig) error {
 		return nil
 	}
 	return err
+}
+
+// serveTLSWithRedirect 在同一端口上同时提供 TLS 和 HTTP->HTTPS 重定向。
+func (ws *WebServer) serveTLSWithRedirect(ln net.Listener, cert *tls.Certificate, handler http.Handler) error {
+	log.Printf("[WebServer] Starting on https://%s (TLS with redirect)", ws.addr)
+
+	// TLS server
+	ws.mu.Lock()
+	httpsSrv := ws.httpServer
+	redirSrv := ws.redirect
+	ws.mu.Unlock()
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+	}
+
+	// Accept loop with simple TLS sniffing
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			if strings.Contains(err.Error(), "closed network connection") {
+				return nil
+			}
+			return err
+		}
+
+		go func(c net.Conn) {
+			br := bufio.NewReader(c)
+			first, err := br.Peek(1)
+			if err != nil {
+				c.Close()
+				return
+			}
+			// TLS ClientHello starts with 0x16
+			if first[0] == 0x16 {
+				tlsConn := tls.Server(newPeekConn(c, br), tlsCfg)
+				httpsSrv.Serve(&singleConnListener{tlsConn})
+				return
+			}
+			// Otherwise treat as plain HTTP and redirect
+			redirSrv.Serve(&singleConnListener{newPeekConn(c, br)})
+		}(conn)
+	}
+}
+
+// singleConnListener 适配单连接给 http.Server 使用。
+type singleConnListener struct {
+	net.Conn
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.Conn == nil {
+		return nil, fmt.Errorf("listener closed")
+	}
+	c := l.Conn
+	l.Conn = nil
+	return c, nil
+}
+
+func (l *singleConnListener) Close() error { return nil }
+
+func (l *singleConnListener) Addr() net.Addr { return l.Conn.LocalAddr() }
+
+// peekConn 在读之前先返回已经 peek 的数据。
+type peekConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func newPeekConn(c net.Conn, br *bufio.Reader) net.Conn {
+	return &peekConn{Conn: c, reader: br}
+}
+
+func (p *peekConn) Read(b []byte) (int, error) {
+	return p.reader.Read(b)
 }
 
 // handleLogs 处理日志请求
