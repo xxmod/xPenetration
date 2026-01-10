@@ -58,6 +58,7 @@ func main() {
 					ControlPort: 7000,
 					UDPPort:     7001,
 					WebPort:     7500,
+					WebTLS:      &config.WebTLS{},
 					Encryption:  config.EncryptionSettings{Enabled: false},
 				},
 				Log: config.LogSettings{
@@ -97,7 +98,11 @@ func main() {
 	}()
 
 	log.Printf("Server started successfully!")
-	log.Printf("Web UI available at http://%s:%d", cfg.Server.ListenAddr, cfg.Server.WebPort)
+	scheme := "http"
+	if cfg.Server.WebTLS != nil && cfg.Server.WebTLS.Enabled && cfg.Server.WebTLS.CertFile != "" && cfg.Server.WebTLS.KeyFile != "" {
+		scheme = "https"
+	}
+	log.Printf("Web UI available at %s://%s:%d", scheme, cfg.Server.ListenAddr, cfg.Server.WebPort)
 
 	// 等待退出信号
 	sigChan := make(chan os.Signal, 1)

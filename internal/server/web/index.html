@@ -395,6 +395,43 @@
                             </div>
                             
                             <hr>
+                            <h5 class="mb-3"><i class="bi bi-lock me-2"></i>Web 管理 HTTPS/SSL</h5>
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="webTlsSwitch" v-model="config.server.web_tls.enabled">
+                                <label class="form-check-label" for="webTlsSwitch">启用面板 HTTPS</label>
+                                <div class="form-text">启用后需要提供服务器上可读取的证书与私钥路径，重启生效</div>
+                            </div>
+
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label">上传证书 (.cer/.crt)</label>
+                                    <div class="input-group">
+                                        <input type="file" class="form-control" accept=".cer,.crt" @change="uploadWebTls('cert', $event)" :disabled="!config.server.web_tls.enabled || webTlsCertUploading">
+                                        <button class="btn btn-outline-secondary" type="button" disabled>
+                                            <span v-if="webTlsCertUploading" class="spinner-border spinner-border-sm"></span>
+                                            <span v-else>选择后自动上传</span>
+                                        </button>
+                                    </div>
+                                    <div class="form-text">已使用：{{ displayFileName(config.server.web_tls.cert_file) || '未上传' }}</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">上传私钥 (.key)</label>
+                                    <div class="input-group">
+                                        <input type="file" class="form-control" accept=".key" @change="uploadWebTls('key', $event)" :disabled="!config.server.web_tls.enabled || webTlsKeyUploading">
+                                        <button class="btn btn-outline-secondary" type="button" disabled>
+                                            <span v-if="webTlsKeyUploading" class="spinner-border spinner-border-sm"></span>
+                                            <span v-else>选择后自动上传</span>
+                                        </button>
+                                    </div>
+                                    <div class="form-text">已使用：{{ displayFileName(config.server.web_tls.key_file) || '未上传' }}</div>
+                                </div>
+                            </div>
+
+                            <div class="alert alert-secondary" role="alert">
+                                上传文件会保存在配置文件同目录下，自动命名为 webui-cert/key.*，重启后生效；若读取失败将回退到 HTTP 并在日志提示。
+                            </div>
+
+                            <hr>
                             
                             <div class="mb-3">
                                 <label class="form-label">日志级别</label>
@@ -505,12 +542,14 @@
                     lastMetricsAt: null,
                     connections: [],
                     config: {
-                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null, encryption: { enabled: false } },
+                        server: { listen_addr: '0.0.0.0', control_port: 7000, udp_port: 7001, web_port: 7500, secret_key: '', web_auth: null, web_tls: { enabled: false, cert_file: '', key_file: '' }, encryption: { enabled: false } },
                         clients: [],
                         log: { level: 'info', output: 'stdout' }
                     },
                     webAuthUsername: '',
                     webAuthPassword: '',
+                    webTlsCertUploading: false,
+                    webTlsKeyUploading: false,
                     serverStatus: true,
                     saving: false,
                     timer: null,
@@ -586,6 +625,9 @@
                         if (!this.config.server.encryption) {
                             this.config.server.encryption = { enabled: false };
                         }
+                        if (!this.config.server.web_tls) {
+                            this.config.server.web_tls = { enabled: false, cert_file: '', key_file: '' };
+                        }
                     } catch (e) {
                         console.error('Failed to fetch config', e);
                         alert('无法加载配置');
@@ -642,6 +684,36 @@
                 },
                 removeTunnel(clientIndex, tunnelIndex) {
                     this.config.clients[clientIndex].tunnels.splice(tunnelIndex, 1);
+                },
+                displayFileName(path) {
+                    if (!path) return '';
+                    const parts = path.split(/[\/\\]/);
+                    return parts[parts.length - 1];
+                },
+                async uploadWebTls(kind, event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    const url = kind === 'cert' ? '/api/webtls/upload/cert' : '/api/webtls/upload/key';
+                    const flag = kind === 'cert' ? 'webTlsCertUploading' : 'webTlsKeyUploading';
+                    this[flag] = true;
+                    try {
+                        const formData = new FormData();
+                        formData.append('file', file);
+                        const res = await axios.post(url, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+                        if (kind === 'cert') {
+                            this.config.server.web_tls.cert_file = res.data.path;
+                        } else {
+                            this.config.server.web_tls.key_file = res.data.path;
+                        }
+                        alert('上传成功');
+                    } catch (e) {
+                        console.error('Failed to upload TLS file', e);
+                        alert('上传失败: ' + e.message);
+                    } finally {
+                        this[flag] = false;
+                        event.target.value = '';
+                    }
                 },
                 formatDate(dateStr) {
                     return new Date(dateStr).toLocaleString();

@@ -23,6 +23,7 @@ type ServerSettings struct {
 	WebPort     int                `yaml:"web_port" json:"web_port"`         // Web管理端口
 	SecretKey   string             `yaml:"secret_key" json:"secret_key"`     // 全局密钥
 	WebAuth     *WebAuth           `yaml:"web_auth" json:"web_auth"`         // Web管理界面Basic Auth（可选）
+	WebTLS      *WebTLS            `yaml:"web_tls" json:"web_tls"`           // Web管理界面TLS配置（可选）
 	Encryption  EncryptionSettings `yaml:"encryption" json:"encryption"`     // 传输加密设置
 }
 
@@ -35,6 +36,13 @@ type EncryptionSettings struct {
 type WebAuth struct {
 	Username string `yaml:"username" json:"username"` // 用户名
 	Password string `yaml:"password" json:"password"` // 密码
+}
+
+// WebTLS Web管理界面TLS配置
+type WebTLS struct {
+	Enabled  bool   `yaml:"enabled" json:"enabled"`     // 是否启用HTTPS
+	CertFile string `yaml:"cert_file" json:"cert_file"` // 证书文件路径（PEM）
+	KeyFile  string `yaml:"key_file" json:"key_file"`   // 私钥文件路径（PEM）
 }
 
 // ClientSettings 客户端配置（服务端侧）
@@ -91,6 +99,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 	if config.Server.WebPort == 0 {
 		config.Server.WebPort = 7500
+	}
+	if config.Server.WebTLS == nil {
+		config.Server.WebTLS = &WebTLS{}
 	}
 	if config.Log.Level == "" {
 		config.Log.Level = "info"

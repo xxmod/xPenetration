@@ -1,14 +1,20 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"xpenetration/internal/config"
 )
@@ -23,6 +29,7 @@ type WebServer struct {
 	mux        *http.ServeMux
 	configPath string
 	mu         sync.Mutex
+	httpServer *http.Server
 }
 
 // NewWebServer 创建Web服务器
@@ -46,6 +53,8 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/metrics", ws.handleMetrics)
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
 	ws.mux.HandleFunc("/api/config", ws.handleConfig)
+	ws.mux.HandleFunc("/api/webtls/upload/cert", ws.handleUploadCert)
+	ws.mux.HandleFunc("/api/webtls/upload/key", ws.handleUploadKey)
 	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
 	// 兼容 /status 与 /status/（部分监控探针不一定带尾部斜杠）
 	ws.mux.HandleFunc("/status", ws.handleStatus)
@@ -64,8 +73,8 @@ func (ws *WebServer) setupRoutes() {
 
 // Start 启动Web服务器
 func (ws *WebServer) Start() error {
-	log.Printf("[WebServer] Starting on %s", ws.addr)
-	return http.ListenAndServe(ws.addr, ws.basicAuthMiddleware(ws.corsMiddleware(ws.mux)))
+	cfg := ws.server.GetConfig()
+	return ws.startWithConfig(cfg)
 }
 
 // corsMiddleware CORS中间件
@@ -190,18 +199,158 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("[WebServer] Config saved to %s", ws.configPath)
 
-		// 重载服务
+		// 重载服务核心
 		go func() {
 			if err := ws.server.Reload(&newConfig); err != nil {
 				log.Printf("[WebServer] Failed to reload server: %v", err)
 			}
 		}()
 
+		// 重启 Web 服务以应用新的端口/TLS 设置
+		go ws.Restart(&newConfig)
+
 		ws.writeJSON(w, map[string]string{"status": "ok", "message": "Config saved and server reloading"})
 		return
 	}
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// handleUploadCert 处理证书上传（.cer/.crt）
+func (ws *WebServer) handleUploadCert(w http.ResponseWriter, r *http.Request) {
+	ws.handleUploadFile(w, r, []string{".cer", ".crt"}, "webui-cert")
+}
+
+// handleUploadKey 处理私钥上传（.key）
+func (ws *WebServer) handleUploadKey(w http.ResponseWriter, r *http.Request) {
+	ws.handleUploadFile(w, r, []string{".key"}, "webui-key")
+}
+
+func (ws *WebServer) handleUploadFile(w http.ResponseWriter, r *http.Request, allowedExt []string, targetBase string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB limit
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "File not found", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	allowed := false
+	for _, e := range allowedExt {
+		if ext == e {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "Unsupported file type", http.StatusBadRequest)
+		return
+	}
+
+	destDir := filepath.Dir(ws.configPath)
+	if destDir == "" || destDir == "." {
+		destDir = "."
+	}
+	targetName := targetBase + ext
+	destPath := filepath.Join(destDir, targetName)
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	out, err := os.Create(destPath)
+	if err != nil {
+		log.Printf("[WebServer] Failed to create file %s: %v", destPath, err)
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		log.Printf("[WebServer] Failed to save file %s: %v", destPath, err)
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+	if err := out.Close(); err != nil {
+		log.Printf("[WebServer] Failed to close file %s: %v", destPath, err)
+	}
+
+	log.Printf("[WebServer] Uploaded %s to %s", header.Filename, destPath)
+	ws.writeJSON(w, map[string]string{
+		"path": destPath,
+		"name": header.Filename,
+	})
+}
+
+// 停止并按新配置重启 Web 服务（用于端口/TLS 切换）
+func (ws *WebServer) Restart(cfg *config.ServerConfig) {
+	ws.Stop()
+	go func() {
+		if err := ws.startWithConfig(cfg); err != nil {
+			log.Printf("[WebServer] Failed to restart: %v", err)
+		}
+	}()
+}
+
+// 关闭当前 Web 服务
+func (ws *WebServer) Stop() {
+	ws.mu.Lock()
+	srv := ws.httpServer
+	ws.httpServer = nil
+	ws.mu.Unlock()
+	if srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+		log.Printf("[WebServer] Shutdown error: %v", err)
+	}
+}
+
+// startWithConfig 根据给定配置启动 Web 服务（阻塞直到关闭）
+func (ws *WebServer) startWithConfig(cfg *config.ServerConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	handler := ws.basicAuthMiddleware(ws.corsMiddleware(ws.mux))
+	addr := fmt.Sprintf("%s:%d", cfg.Server.ListenAddr, cfg.Server.WebPort)
+
+	ws.mu.Lock()
+	ws.addr = addr
+	ws.httpServer = &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+	ws.mu.Unlock()
+
+	if cfg.Server.WebTLS != nil && cfg.Server.WebTLS.Enabled {
+		certFile := strings.TrimSpace(cfg.Server.WebTLS.CertFile)
+		keyFile := strings.TrimSpace(cfg.Server.WebTLS.KeyFile)
+		if certFile != "" && keyFile != "" {
+			log.Printf("[WebServer] Starting on https://%s (TLS)", addr)
+			err := ws.httpServer.ListenAndServeTLS(certFile, keyFile)
+			if err == http.ErrServerClosed {
+				return nil
+			}
+			return err
+		}
+		log.Printf("[WebServer] TLS enabled but cert/key missing, fallback to HTTP")
+	}
+
+	log.Printf("[WebServer] Starting on http://%s", addr)
+	err := ws.httpServer.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 // handleLogs 处理日志请求

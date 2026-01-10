@@ -9,6 +9,11 @@ server:
   udp_port: 7001
   # Web管理界面端口
   web_port: 7500
+  # Web管理界面 HTTPS/TLS 设置
+  web_tls:
+    enabled: false          # 是否启用HTTPS
+    cert_file: ""          # 证书文件路径（PEM）
+    key_file: ""           # 私钥文件路径（PEM）
   # 传输加密开关（对TCP与UDP隧道数据加密）
   encryption:
     enabled: true
