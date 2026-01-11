@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -481,17 +482,53 @@ func (s *Server) startTunnelListener(tunnel protocol.Tunnel, clientName string) 
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.config.Server.ListenAddr, tunnel.ServerPort)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
+
+	var listener net.Listener
+	var err error
+
+	// 如果启用了 TLS，使用 Web 面板的证书创建 TLS 监听器
+	if tunnel.EnableTLS {
+		tlsConfig, tlsErr := s.getTunnelTLSConfig()
+		if tlsErr != nil {
+			return fmt.Errorf("failed to load TLS config for tunnel %s: %v", tunnel.Name, tlsErr)
+		}
+		listener, err = tls.Listen("tcp", addr, tlsConfig)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Server] TLS Tunnel %s listening on port %d (HTTPS) -> client %s port %d",
+			tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
+	} else {
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Server] Tunnel %s listening on port %d -> client %s port %d",
+			tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
 	}
 
 	s.tunnelListeners[tunnel.ServerPort] = listener
-	log.Printf("[Server] Tunnel %s listening on port %d -> client %s port %d",
-		tunnel.Name, tunnel.ServerPort, clientName, tunnel.ClientPort)
 
 	go s.acceptTunnelConnections(listener, tunnel, clientName)
 	return nil
+}
+
+// getTunnelTLSConfig 获取隧道使用的 TLS 配置（使用 Web 面板的证书）
+func (s *Server) getTunnelTLSConfig() (*tls.Config, error) {
+	webTLS := s.config.Server.WebTLS
+	if webTLS == nil || webTLS.CertFile == "" || webTLS.KeyFile == "" {
+		return nil, fmt.Errorf("web TLS certificate not configured, please set web_tls.cert_file and web_tls.key_file")
+	}
+
+	cert, err := tls.LoadX509KeyPair(webTLS.CertFile, webTLS.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS certificate: %v", err)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // startUDPTunnelListener 启动UDP隧道监听器

@@ -294,6 +294,7 @@
                                         <th>隧道名称</th>
                                         <th>协议</th>
                                         <th>UDP模式</th>
+                                        <th>启用TLS</th>
                                         <th>服务端端口 (公网)</th>
                                         <th>目标IP</th>
                                         <th>客户端端口 (内网)</th>
@@ -314,6 +315,9 @@
                                                 <option value="native">原生UDP</option>
                                                 <option value="tcp">TCP封装</option>
                                             </select>
+                                        </td>
+                                        <td class="text-center">
+                                            <input type="checkbox" class="form-check-input" v-model="tunnel.enable_tls" :disabled="tunnel.protocol !== 'tcp'" title="启用后服务端对外提供TLS加密连接（如HTTPS），需要配置Web TLS证书，且客户端软件需支持TLS">
                                         </td>
                                         <td><input type="number" class="form-control form-control-sm" v-model.number="tunnel.server_port"></td>
                                         <td><input type="text" class="form-control form-control-sm" v-model="tunnel.target_ip" placeholder="127.0.0.1"></td>
@@ -399,7 +403,7 @@
                             <div class="form-check form-switch mb-3">
                                 <input class="form-check-input" type="checkbox" role="switch" id="webTlsSwitch" v-model="config.server.web_tls.enabled">
                                 <label class="form-check-label" for="webTlsSwitch">启用面板 HTTPS</label>
-                                <div class="form-text">启用后需要提供服务器上可读取的证书与私钥路径，重启生效</div>
+                                <div class="form-text">启用后需要提供服务器上可读取的证书与私钥路径，此功能同时用于隧道列表中的TLS证书，重启生效</div>
                             </div>
 
                             <div class="row mb-3">
@@ -428,7 +432,7 @@
                             </div>
 
                             <div class="alert alert-secondary" role="alert">
-                                上传文件会保存在配置文件同目录下，自动命名为 webui-cert/key.*，重启后生效；若读取失败将回退到 HTTP 并在日志提示。
+                                上传文件会保存在配置文件同目录下，自动命名为 webui-cert/key.*，重启后生效
                             </div>
 
                             <hr>
@@ -677,6 +681,7 @@
                         name: 'new-tunnel',
                         protocol: 'tcp',
                         udp_mode: 'native',
+                        enable_tls: false,
                         server_port: 0,
                         client_port: 0,
                         target_ip: ''

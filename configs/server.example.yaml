@@ -68,6 +68,12 @@ clients:
         client_port: 443
         server_port: 10443
         protocol: "tcp"
+      # 启用TLS的隧道示例（服务端提供HTTPS，使用Web面板证书）
+      - name: "web-tls"
+        client_port: 80           # 客户端本地HTTP服务
+        server_port: 10444        # 服务端暴露HTTPS端口
+        protocol: "tcp"
+        enable_tls: true          # 启用TLS，外部访问使用HTTPS
       - name: "dev-api"
         client_port: 8080
         server_port: 18080

@@ -100,6 +100,7 @@ type Tunnel struct {
 	Protocol   string `json:"protocol" yaml:"protocol"`       // tcp/udp
 	UDPMode    string `json:"udp_mode" yaml:"udp_mode"`       // UDP隧道模式: native(原生UDP) 或 tcp(TCP封装,备用)
 	TargetIP   string `json:"target_ip" yaml:"target_ip"`     // 目标IP地址，默认为127.0.0.1（本机），可设置为局域网内其他设备IP
+	EnableTLS  bool   `json:"enable_tls" yaml:"enable_tls"`   // 是否启用TLS（用于TCP隧道，使用Web面板的证书）
 }
 
 // NewConnection 新连接通知

@@ -8,6 +8,7 @@
 
 - 密钥验证（支持全局密钥与客户端独立密钥）
 - TCP/UDP 隧道（在服务端映射端口，对外提供访问）
+- TCP 隧道 TLS 加密（可选，使用证书对外提供 HTTPS 等加密连接）
 - 局域网设备穿透（可穿透同一局域网内其他设备的端口，不仅限于本机）
 - 隧道配置由服务端统一指定，客户端仅作为节点连接
 - 支持使用TCP封装UDP传输UDP数据包（作为备用选项）
@@ -78,7 +79,7 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 
 ### 配置文件内容
 
-服务端配置示例见 `configs/server.example.yaml`：
+服务端配置示例见 `configs/server.example.yaml`（配置均可在面板中调节）：
 
 - `server.listen_addr` / `server.control_port`：客户端连接的控制通道监听地址与端口
 - `server.web_port`：Web 管理界面端口
@@ -90,6 +91,7 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
   - `server_port`：服务端对外暴露端口
   - `protocol`：`tcp` 或 `udp`
   - `target_ip`：（可选）目标设备IP地址，默认为 `127.0.0.1`（本机）。可设置为局域网内其他设备的IP地址（如 `192.168.1.100`），实现穿透同一局域网下其他设备的端口
+  - `enable_tls`：（可选）是否启用 TLS 加密，仅对 TCP 隧道有效。启用后服务端对外提供 TLS 加密连接（如 HTTPS），需先配置 `server.web_tls` 证书
 
 客户端配置示例见 `configs/client.example.yaml`：
 
