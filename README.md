@@ -9,10 +9,14 @@
 - 密钥验证（支持全局密钥与客户端独立密钥）
 - TCP/UDP 隧道（在服务端映射端口，对外提供访问）
 - TCP 隧道 TLS 加密（可选，使用证书对外提供 HTTPS 等加密连接）
+- **ACME 自动证书**（支持 Let's Encrypt、ZeroSSL 等，自动申请与续签 SSL 证书）
+  - HTTP-01 挑战（需开放 80 端口）
+  - DNS-01 挑战（支持 Cloudflare、阿里云 DNS、腾讯云 DNSPod，无需开放 80 端口，支持通配符证书）
+  - EAB 支持（用于 ZeroSSL、Google Trust Services 等需要外部账户绑定的 CA）
 - 局域网设备穿透（可穿透同一局域网内其他设备的端口，不仅限于本机）
 - 隧道配置由服务端统一指定，客户端仅作为节点连接
 - 支持使用TCP封装UDP传输UDP数据包（作为备用选项）
-- Web 管理界面（查看/调整服务端配置，支持 Basic Auth 认证保护）
+- Web 管理界面（查看/调整服务端配置，支持 Basic Auth 认证保护、HTTPS）
 - 可通过网页状态码判断服务健康状态
 - 客户端自动重连
 
@@ -98,3 +102,52 @@ bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
 - `client.server_addr` / `client.server_port`
 - `client.client_name`：必须与服务端 `clients[].name` 匹配
 - `client.secret_key`：需与服务端全局密钥或该客户端独立密钥一致
+
+### ACME 自动证书配置
+
+xPenetration 支持通过 ACME 协议自动申请和续签 SSL 证书（如 Let's Encrypt），可用于 Web 管理界面 HTTPS 和 TLS 隧道。
+
+配置位于 `server.yaml` 的 `acme` 部分，也可通过 Web 管理界面的「SSL配置」页面进行配置：
+
+```yaml
+acme:
+  enabled: true                # 启用 ACME
+  email: "admin@example.com"   # 注册邮箱
+  domains:                     # 证书域名
+    - "example.com"
+  accept_tos: true             # 同意服务条款
+  auto_renew: true             # 自动续签
+  
+  # 验证方式（二选一）
+  challenge_type: "http-01"    # HTTP-01 需开放 80 端口
+  # challenge_type: "dns-01"   # DNS-01 无需 80 端口，支持通配符
+  
+  # DNS-01 配置（仅 dns-01 模式需要）
+  dns_provider: "cloudflare"   # cloudflare / alidns / tencentcloud
+  dns_config: '{"api_token": "your-cloudflare-api-token"}'
+```
+
+#### 支持的 DNS 提供商
+
+| 提供商        | dns_provider     | dns_config 格式                                          |
+| ------------- | ---------------- | -------------------------------------------------------- |
+| Cloudflare    | `cloudflare`   | `{"api_token": "xxx"}`                                 |
+| 阿里云 DNS    | `alidns`       | `{"access_key_id": "xxx", "access_key_secret": "xxx"}` |
+| 腾讯云 DNSPod | `tencentcloud` | `{"secret_id": "xxx", "secret_key": "xxx"}`            |
+
+#### EAB 配置（ZeroSSL 等）
+
+部分 CA（如 ZeroSSL、Google Trust Services）需要 External Account Binding：
+
+```yaml
+acme:
+  enabled: true
+  ca_server: "https://acme.zerossl.com/v2/DV90"
+  eab_enabled: true
+  eab_kid: "your-eab-kid"
+  eab_hmac_key: "your-eab-hmac-key"
+```
+
+## 许可证
+
+MIT License

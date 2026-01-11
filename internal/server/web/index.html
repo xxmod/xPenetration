@@ -56,6 +56,11 @@
                     </a>
                 </li>
                 <li>
+                    <a class="nav-link" :class="{ active: currentView === 'ssl' }" @click="switchView('ssl')">
+                        <i class="bi bi-shield-lock me-2"></i> SSL 配置
+                    </a>
+                </li>
+                <li>
                     <a class="nav-link" :class="{ active: currentView === 'logs' }" @click="switchView('logs')">
                         <i class="bi bi-journal-text me-2"></i> 系统日志
                     </a>
@@ -104,6 +109,11 @@
                         <li>
                             <a class="nav-link" :class="{ active: currentView === 'clients' }" @click="switchView('clients')" data-bs-dismiss="offcanvas">
                                 <i class="bi bi-people me-2"></i> 客户端管理
+                            </a>
+                        </li>
+                        <li>
+                            <a class="nav-link" :class="{ active: currentView === 'ssl' }" @click="switchView('ssl')" data-bs-dismiss="offcanvas">
+                                <i class="bi bi-shield-lock me-2"></i> SSL 配置
                             </a>
                         </li>
                         <li>
@@ -384,7 +394,7 @@
                             </div>
                             
                             <hr>
-                            <h5 class="mb-3"><i class="bi bi-shield-lock me-2"></i>Web管理界面认证 (Basic Auth)</h5>
+                            <h5 class="mb-3"><i class="bi bi-person-lock me-2"></i>Web管理界面认证 (Basic Auth)</h5>
                             <div class="row mb-3">
                                 <div class="col-md-6">
                                     <label class="form-label">用户名</label>
@@ -398,43 +408,6 @@
                                 </div>
                             </div>
                             
-                            <hr>
-                            <h5 class="mb-3"><i class="bi bi-lock me-2"></i>Web 管理 HTTPS/SSL</h5>
-                            <div class="form-check form-switch mb-3">
-                                <input class="form-check-input" type="checkbox" role="switch" id="webTlsSwitch" v-model="config.server.web_tls.enabled">
-                                <label class="form-check-label" for="webTlsSwitch">启用面板 HTTPS</label>
-                                <div class="form-text">启用后需要提供服务器上可读取的证书与私钥路径，此功能同时用于隧道列表中的TLS证书，重启生效</div>
-                            </div>
-
-                            <div class="row mb-3">
-                                <div class="col-md-6">
-                                    <label class="form-label">上传证书 (.cer/.crt)</label>
-                                    <div class="input-group">
-                                        <input type="file" class="form-control" accept=".cer,.crt" @change="uploadWebTls('cert', $event)" :disabled="!config.server.web_tls.enabled || webTlsCertUploading">
-                                        <button class="btn btn-outline-secondary" type="button" disabled>
-                                            <span v-if="webTlsCertUploading" class="spinner-border spinner-border-sm"></span>
-                                            <span v-else>选择后自动上传</span>
-                                        </button>
-                                    </div>
-                                    <div class="form-text">已使用：{{ displayFileName(config.server.web_tls.cert_file) || '未上传' }}</div>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label">上传私钥 (.key)</label>
-                                    <div class="input-group">
-                                        <input type="file" class="form-control" accept=".key" @change="uploadWebTls('key', $event)" :disabled="!config.server.web_tls.enabled || webTlsKeyUploading">
-                                        <button class="btn btn-outline-secondary" type="button" disabled>
-                                            <span v-if="webTlsKeyUploading" class="spinner-border spinner-border-sm"></span>
-                                            <span v-else>选择后自动上传</span>
-                                        </button>
-                                    </div>
-                                    <div class="form-text">已使用：{{ displayFileName(config.server.web_tls.key_file) || '未上传' }}</div>
-                                </div>
-                            </div>
-
-                            <div class="alert alert-secondary" role="alert">
-                                上传文件会保存在配置文件同目录下，自动命名为 webui-cert/key.*，重启后生效
-                            </div>
-
                             <hr>
                             
                             <div class="mb-3">
@@ -454,6 +427,265 @@
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SSL Configuration -->
+            <div v-if="currentView === 'ssl'">
+                <h2 class="mb-4"><i class="bi bi-shield-lock me-2"></i>SSL 证书配置</h2>
+                
+                <!-- Web TLS 手动配置 -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="bi bi-lock me-2"></i>Web 管理面板 HTTPS</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" role="switch" id="webTlsSwitch" v-model="config.server.web_tls.enabled">
+                            <label class="form-check-label" for="webTlsSwitch">启用面板 HTTPS</label>
+                            <div class="form-text">启用后需要提供证书与私钥，此证书同时用于隧道列表中的 TLS 加密隧道，保存后重启生效</div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label">上传证书 (.cer/.crt/.pem)</label>
+                                <div class="input-group">
+                                    <input type="file" class="form-control" accept=".cer,.crt,.pem" @change="uploadWebTls('cert', $event)" :disabled="!config.server.web_tls.enabled || webTlsCertUploading">
+                                    <button class="btn btn-outline-secondary" type="button" disabled>
+                                        <span v-if="webTlsCertUploading" class="spinner-border spinner-border-sm"></span>
+                                        <span v-else>选择后自动上传</span>
+                                    </button>
+                                </div>
+                                <div class="form-text">当前证书：{{ displayFileName(config.server.web_tls.cert_file) || '未配置' }}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">上传私钥 (.key/.pem)</label>
+                                <div class="input-group">
+                                    <input type="file" class="form-control" accept=".key,.pem" @change="uploadWebTls('key', $event)" :disabled="!config.server.web_tls.enabled || webTlsKeyUploading">
+                                    <button class="btn btn-outline-secondary" type="button" disabled>
+                                        <span v-if="webTlsKeyUploading" class="spinner-border spinner-border-sm"></span>
+                                        <span v-else>选择后自动上传</span>
+                                    </button>
+                                </div>
+                                <div class="form-text">当前私钥：{{ displayFileName(config.server.web_tls.key_file) || '未配置' }}</div>
+                            </div>
+                        </div>
+
+                        <div class="alert alert-info" role="alert">
+                            <i class="bi bi-info-circle me-1"></i> 手动上传的证书会保存在配置文件同目录下。如需自动申请免费证书，请使用下方的 ACME 功能。
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                            <button type="button" class="btn btn-primary" @click="saveConfig" :disabled="saving">
+                                <span v-if="saving" class="spinner-border spinner-border-sm me-2"></span>
+                                保存并重启服务
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ACME 自动证书 -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-shield-check me-2"></i>ACME 自动证书 (Let's Encrypt)</h5>
+                        <span class="badge" :class="acmeStatus?.enabled ? 'bg-success' : 'bg-secondary'">{{ acmeStatus?.enabled ? '已启用' : '未启用' }}</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" role="switch" id="acmeSwitch" v-model="acmeConfig.enabled" @change="onAcmeEnabledChange">
+                            <label class="form-check-label" for="acmeSwitch">启用 ACME 自动证书</label>
+                            <div class="form-text">自动从 Let's Encrypt 等 CA 申请免费 SSL 证书并自动续签，申请成功后将自动应用到 Web 面板和 TLS 隧道</div>
+                        </div>
+                        
+                        <div v-if="acmeConfig.enabled">
+                            <hr>
+                            <h6 class="mb-3">基本配置</h6>
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label">邮箱地址 <span class="text-danger">*</span></label>
+                                    <input type="email" class="form-control" v-model="acmeConfig.email" placeholder="admin@example.com">
+                                    <div class="form-text">用于 CA 通知证书过期等重要信息</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">CA 服务器</label>
+                                    <select class="form-select" v-model="acmeConfig.ca_server">
+                                        <option v-for="(url, name) in acmeCAServers" :key="name" :value="url">{{ name }}</option>
+                                    </select>
+                                    <div class="form-text">建议先用 letsencrypt_staging 测试，成功后切换到正式环境</div>
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label class="form-label">域名列表 <span class="text-danger">*</span></label>
+                                <div class="input-group mb-2" v-for="(domain, idx) in acmeConfig.domains" :key="idx">
+                                    <input type="text" class="form-control" v-model="acmeConfig.domains[idx]" placeholder="example.com">
+                                    <button class="btn btn-outline-danger" type="button" @click="removeAcmeDomain(idx)"><i class="bi bi-trash"></i></button>
+                                </div>
+                                <button class="btn btn-sm btn-outline-secondary" type="button" @click="addAcmeDomain"><i class="bi bi-plus"></i> 添加域名</button>
+                                <div class="form-text">域名需要正确解析到本服务器 IP，支持多个域名</div>
+                            </div>
+
+                            <hr>
+                            <h6 class="mb-3">EAB 配置（External Account Binding）</h6>
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" role="switch" id="eabSwitch" v-model="acmeConfig.eab_enabled">
+                                <label class="form-check-label" for="eabSwitch">启用 EAB</label>
+                                <div class="form-text">某些 CA（如 ZeroSSL、Google Trust Services）需要 EAB 凭据才能申请证书</div>
+                            </div>
+                            <div class="row mb-3" v-if="acmeConfig.eab_enabled">
+                                <div class="col-md-6">
+                                    <label class="form-label">EAB Key ID (Kid)</label>
+                                    <input type="text" class="form-control" v-model="acmeConfig.eab_kid" placeholder="从 CA 获取的 Key ID">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">EAB HMAC Key</label>
+                                    <input type="text" class="form-control" v-model="acmeConfig.eab_hmac_key" placeholder="从 CA 获取的 HMAC Key">
+                                </div>
+                            </div>
+                            
+                            <hr>
+                            <h6 class="mb-3">验证方式</h6>
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label">挑战类型</label>
+                                    <select class="form-select" v-model="acmeConfig.challenge_type">
+                                        <option value="http-01">HTTP-01（需要 80 端口）</option>
+                                        <option value="dns-01">DNS-01（通过 DNS TXT 记录验证）</option>
+                                    </select>
+                                    <div class="form-text">DNS-01 不需要开放 80 端口，且支持通配符证书</div>
+                                </div>
+                            </div>
+                            
+                            <!-- HTTP-01 配置 -->
+                            <div class="row mb-3" v-if="acmeConfig.challenge_type !== 'dns-01'">
+                                <div class="col-md-4">
+                                    <label class="form-label">HTTP-01 挑战监听端口</label>
+                                    <input type="number" class="form-control" v-model.number="acmeConfig.http_port">
+                                    <div class="form-text text-warning"><i class="bi bi-exclamation-triangle me-1"></i>CA 只会访问 80 端口验证，如使用其他端口需配置反向代理转发</div>
+                                </div>
+                            </div>
+                            
+                            <!-- DNS-01 配置 -->
+                            <div v-if="acmeConfig.challenge_type === 'dns-01'">
+                                <div class="row mb-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label">DNS 提供商 <span class="text-danger">*</span></label>
+                                        <select class="form-select" v-model="acmeConfig.dns_provider" @change="onDNSProviderChange">
+                                            <option value="">-- 请选择 --</option>
+                                            <option v-for="(info, key) in dnsProviders" :key="key" :value="key">{{ info.name }}</option>
+                                        </select>
+                                        <div class="form-text">选择您的 DNS 服务提供商</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="card bg-light mb-3" v-if="acmeConfig.dns_provider && dnsProviders[acmeConfig.dns_provider]">
+                                    <div class="card-header">
+                                        <i class="bi bi-gear me-1"></i> {{ dnsProviders[acmeConfig.dns_provider].name }} 配置
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3" v-for="field in dnsProviders[acmeConfig.dns_provider].config_fields" :key="field.name">
+                                                <label class="form-label">{{ field.label }} <span class="text-danger" v-if="field.required">*</span></label>
+                                                <input :type="field.type" class="form-control" v-model="dnsConfigFields[field.name]" :placeholder="field.help">
+                                                <div class="form-text">{{ field.help }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="alert alert-info" role="alert">
+                                    <i class="bi bi-info-circle me-1"></i>
+                                    <strong>DNS-01 验证说明：</strong>申请证书时，系统将通过 API 自动在您的 DNS 服务商添加 TXT 记录进行验证。
+                                    此方式<strong>不需要开放 80 端口</strong>，且支持申请通配符证书（如 <code>*.example.com</code>）。
+                                </div>
+                            </div>
+                            
+                            <hr>
+                            <h6 class="mb-3">高级配置</h6>
+                            <div class="row mb-3">
+                                <div class="col-md-3">
+                                    <label class="form-label">提前续签天数</label>
+                                    <input type="number" class="form-control" v-model.number="acmeConfig.renew_before">
+                                    <div class="form-text">到期前多少天自动续签</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">检查间隔（小时）</label>
+                                    <input type="number" class="form-control" v-model.number="acmeConfig.renew_interval">
+                                    <div class="form-text">每隔多久检查是否需要续签</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">数据存储目录</label>
+                                    <input type="text" class="form-control" v-model="acmeConfig.data_dir">
+                                    <div class="form-text">ACME 账户和证书存储位置</div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="form-check form-switch mt-4">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="acmeAutoRenewSwitch" v-model="acmeConfig.auto_renew">
+                                        <label class="form-check-label" for="acmeAutoRenewSwitch">启用自动续签</label>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="form-check mb-3">
+                                <input class="form-check-input" type="checkbox" id="acmeTosCheck" v-model="acmeConfig.accept_tos">
+                                <label class="form-check-label" for="acmeTosCheck">
+                                    我同意 <a href="https://letsencrypt.org/repository/" target="_blank">Let's Encrypt 服务条款</a> <span class="text-danger">*</span>
+                                </label>
+                            </div>
+                            
+                            <div class="d-flex gap-2 flex-wrap mb-3">
+                                <button type="button" class="btn btn-primary" @click="saveAcmeConfig" :disabled="acmeSaving">
+                                    <span v-if="acmeSaving" class="spinner-border spinner-border-sm me-1"></span>
+                                    <i class="bi bi-save me-1" v-else></i> 保存 ACME 配置
+                                </button>
+                                <button type="button" class="btn btn-success" @click="obtainAcmeCert" :disabled="acmeObtaining">
+                                    <span v-if="acmeObtaining" class="spinner-border spinner-border-sm me-1"></span>
+                                    <i class="bi bi-download me-1" v-else></i> 申请证书
+                                </button>
+                                <button type="button" class="btn btn-warning" @click="renewAcmeCert" :disabled="acmeRenewing">
+                                    <span v-if="acmeRenewing" class="spinner-border spinner-border-sm me-1"></span>
+                                    <i class="bi bi-arrow-repeat me-1" v-else></i> 手动续签
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- ACME 状态显示 -->
+                        <div class="card bg-light" v-if="acmeStatus && acmeConfig.enabled">
+                            <div class="card-header">
+                                <i class="bi bi-info-circle me-1"></i> ACME 状态
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <p class="mb-1"><strong>启用状态：</strong> 
+                                            <span class="badge" :class="acmeStatus.enabled ? 'bg-success' : 'bg-secondary'">{{ acmeStatus.enabled ? '已启用' : '未启用' }}</span>
+                                        </p>
+                                        <p class="mb-1"><strong>配置状态：</strong>
+                                            <span class="badge" :class="acmeStatus.configured ? 'bg-success' : 'bg-warning'">{{ acmeStatus.configured ? '已配置' : '未配置' }}</span>
+                                        </p>
+                                        <p class="mb-1"><strong>账户注册：</strong>
+                                            <span class="badge" :class="acmeStatus.registered ? 'bg-success' : 'bg-warning'">{{ acmeStatus.registered ? '已注册' : '未注册' }}</span>
+                                        </p>
+                                        <p class="mb-1" v-if="acmeStatus.last_error"><strong>最近错误：</strong> <span class="text-danger">{{ acmeStatus.last_error }}</span></p>
+                                    </div>
+                                    <div class="col-md-6" v-if="acmeStatus.certificate_info">
+                                        <p class="mb-1"><strong>证书域名：</strong> {{ acmeStatus.certificate_info.domains?.join(', ') || '-' }}</p>
+                                        <p class="mb-1"><strong>颁发者：</strong> {{ acmeStatus.certificate_info.issuer || '-' }}</p>
+                                        <p class="mb-1"><strong>有效期至：</strong> {{ formatDate(acmeStatus.certificate_info.not_after) }}</p>
+                                        <p class="mb-1"><strong>剩余天数：</strong> 
+                                            <span class="badge" :class="acmeStatus.certificate_info.days_left > 30 ? 'bg-success' : (acmeStatus.certificate_info.days_left > 7 ? 'bg-warning' : 'bg-danger')">
+                                                {{ acmeStatus.certificate_info.days_left }} 天
+                                            </span>
+                                        </p>
+                                        <p class="mb-1"><strong>证书路径：</strong> <code>{{ acmeStatus.certificate_info.cert_file }}</code></p>
+                                    </div>
+                                </div>
+                                <div class="mt-2" v-if="acmeStatus.next_renew_check">
+                                    <small class="text-muted">下次续签检查：{{ formatDate(acmeStatus.next_renew_check) }}</small>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -562,7 +794,33 @@
                     logFilter: {
                         level: '',
                         source: ''
-                    }
+                    },
+                    // ACME 相关数据
+                    acmeConfig: {
+                        enabled: false,
+                        email: '',
+                        domains: [],
+                        ca_server: '',
+                        accept_tos: false,
+                        renew_before: 30,
+                        http_port: 80,
+                        data_dir: 'acme',
+                        auto_renew: true,
+                        renew_interval: 24,
+                        eab_enabled: false,
+                        eab_kid: '',
+                        eab_hmac_key: '',
+                        challenge_type: 'http-01',
+                        dns_provider: '',
+                        dns_config: ''
+                    },
+                    acmeStatus: null,
+                    acmeCAServers: {},
+                    dnsProviders: {},
+                    dnsConfigFields: {},
+                    acmeSaving: false,
+                    acmeObtaining: false,
+                    acmeRenewing: false
                 }
             },
             computed: {
@@ -577,6 +835,10 @@
             mounted() {
                 this.fetchData();
                 this.fetchConfig();
+                this.fetchAcmeCAServers();
+                this.fetchDNSProviders();
+                this.fetchAcmeConfig();
+                this.fetchAcmeStatus();
                 this.timer = setInterval(this.fetchData, 1000);
             },
             beforeUnmount() {
@@ -818,6 +1080,162 @@
                 },
                 getFallback(tm) {
                     return this.isTCP(tm) ? '-' : (tm.udp_fallbacks || 0);
+                },
+                // ACME 相关方法
+                async fetchAcmeCAServers() {
+                    try {
+                        const res = await axios.get('/api/acme/ca-servers');
+                        this.acmeCAServers = res.data || {};
+                        // 设置默认值
+                        if (!this.acmeConfig.ca_server && Object.keys(this.acmeCAServers).length > 0) {
+                            this.acmeConfig.ca_server = this.acmeCAServers['letsencrypt'] || Object.values(this.acmeCAServers)[0];
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch ACME CA servers', e);
+                    }
+                },
+                async fetchDNSProviders() {
+                    try {
+                        const res = await axios.get('/api/acme/dns-providers');
+                        this.dnsProviders = res.data || {};
+                    } catch (e) {
+                        console.error('Failed to fetch DNS providers', e);
+                    }
+                },
+                onDNSProviderChange() {
+                    // 切换DNS提供商时重置配置字段
+                    this.dnsConfigFields = {};
+                },
+                async fetchAcmeConfig() {
+                    try {
+                        const res = await axios.get('/api/acme/config');
+                        if (res.data) {
+                            this.acmeConfig = {
+                                enabled: res.data.enabled || false,
+                                email: res.data.email || '',
+                                domains: res.data.domains || [],
+                                ca_server: res.data.ca_server || '',
+                                accept_tos: res.data.accept_tos || false,
+                                renew_before: res.data.renew_before || 30,
+                                http_port: res.data.http_port || 80,
+                                data_dir: res.data.data_dir || 'acme',
+                                auto_renew: res.data.auto_renew !== false,
+                                renew_interval: res.data.renew_interval || 24,
+                                eab_enabled: res.data.eab_enabled || false,
+                                eab_kid: res.data.eab_kid || '',
+                                eab_hmac_key: res.data.eab_hmac_key || '',
+                                challenge_type: res.data.challenge_type || 'http-01',
+                                dns_provider: res.data.dns_provider || '',
+                                dns_config: res.data.dns_config || ''
+                            };
+                            // 确保至少有一个空域名输入框
+                            if (this.acmeConfig.domains.length === 0) {
+                                this.acmeConfig.domains.push('');
+                            }
+                            // 解析 DNS 配置
+                            if (this.acmeConfig.dns_config) {
+                                try {
+                                    this.dnsConfigFields = JSON.parse(this.acmeConfig.dns_config);
+                                } catch (e) {
+                                    this.dnsConfigFields = {};
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch ACME config', e);
+                    }
+                },
+                async fetchAcmeStatus() {
+                    try {
+                        const res = await axios.get('/api/acme/status');
+                        this.acmeStatus = res.data;
+                    } catch (e) {
+                        console.error('Failed to fetch ACME status', e);
+                    }
+                },
+                async saveAcmeConfig() {
+                    // 验证
+                    if (this.acmeConfig.enabled) {
+                        if (!this.acmeConfig.email) {
+                            alert('请输入邮箱地址');
+                            return;
+                        }
+                        const validDomains = this.acmeConfig.domains.filter(d => d.trim());
+                        if (validDomains.length === 0) {
+                            alert('请输入至少一个域名');
+                            return;
+                        }
+                        if (!this.acmeConfig.accept_tos) {
+                            alert('请同意服务条款');
+                            return;
+                        }
+                        // DNS-01 验证
+                        if (this.acmeConfig.challenge_type === 'dns-01') {
+                            if (!this.acmeConfig.dns_provider) {
+                                alert('请选择 DNS 提供商');
+                                return;
+                            }
+                        }
+                        this.acmeConfig.domains = validDomains;
+                        // 将 DNS 配置字段转为 JSON
+                        if (this.acmeConfig.challenge_type === 'dns-01' && Object.keys(this.dnsConfigFields).length > 0) {
+                            this.acmeConfig.dns_config = JSON.stringify(this.dnsConfigFields);
+                        }
+                    }
+
+                    this.acmeSaving = true;
+                    try {
+                        await axios.post('/api/acme/config', this.acmeConfig);
+                        alert('ACME 配置已保存');
+                        await this.fetchAcmeStatus();
+                    } catch (e) {
+                        console.error('Failed to save ACME config', e);
+                        alert('保存 ACME 配置失败: ' + (e.response?.data?.message || e.message));
+                    } finally {
+                        this.acmeSaving = false;
+                    }
+                },
+                async obtainAcmeCert() {
+                    if (!confirm('确定要申请新证书吗？这将向 CA 发起请求。')) return;
+                    this.acmeObtaining = true;
+                    try {
+                        const res = await axios.post('/api/acme/obtain');
+                        alert(res.data.message || '证书申请已开始，请稍后查看状态');
+                        setTimeout(() => this.fetchAcmeStatus(), 3000);
+                    } catch (e) {
+                        console.error('Failed to obtain ACME certificate', e);
+                        alert('申请证书失败: ' + (e.response?.data?.message || e.message));
+                    } finally {
+                        this.acmeObtaining = false;
+                    }
+                },
+                async renewAcmeCert() {
+                    if (!confirm('确定要手动续签证书吗？')) return;
+                    this.acmeRenewing = true;
+                    try {
+                        const res = await axios.post('/api/acme/renew');
+                        alert(res.data.message || '证书续签已开始，请稍后查看状态');
+                        setTimeout(() => this.fetchAcmeStatus(), 3000);
+                    } catch (e) {
+                        console.error('Failed to renew ACME certificate', e);
+                        alert('续签证书失败: ' + (e.response?.data?.message || e.message));
+                    } finally {
+                        this.acmeRenewing = false;
+                    }
+                },
+                addAcmeDomain() {
+                    this.acmeConfig.domains.push('');
+                },
+                removeAcmeDomain(index) {
+                    this.acmeConfig.domains.splice(index, 1);
+                    if (this.acmeConfig.domains.length === 0) {
+                        this.acmeConfig.domains.push('');
+                    }
+                },
+                onAcmeEnabledChange() {
+                    if (this.acmeConfig.enabled && this.acmeConfig.domains.length === 0) {
+                        this.acmeConfig.domains.push('');
+                    }
                 }
             }
         }).mount('#app')

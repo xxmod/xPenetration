@@ -26,6 +26,33 @@ server:
   #   username: "admin"
   #   password: "your-password"
 
+# ACME 自动证书配置（Let's Encrypt 等）
+# 启用后可自动申请和续签 SSL 证书，用于 Web 面板 HTTPS 和 TLS 隧道
+acme:
+  enabled: false              # 是否启用 ACME 自动证书
+  email: ""                   # 注册邮箱（用于 CA 通知）
+  domains: []                 # 申请证书的域名列表，如 ["example.com", "www.example.com"]
+  ca_server: ""               # CA 服务器 URL（留空默认 Let's Encrypt 正式环境）
+                              # 测试时建议使用: https://acme-staging-v02.api.letsencrypt.org/directory
+  accept_tos: false           # 是否同意服务条款（必须设为 true 才能申请证书）
+  renew_before: 30            # 证书到期前多少天自动续签
+  http_port: 80               # HTTP-01 挑战使用的端口（需确保防火墙开放）
+  data_dir: "acme"            # ACME 数据存储目录（账户密钥、证书等）
+  auto_renew: true            # 是否启用自动续签
+  renew_interval: 24          # 续签检查间隔（小时）
+  # EAB 配置（External Account Binding，部分 CA 如 ZeroSSL 需要）
+  eab_enabled: false
+  eab_kid: ""
+  eab_hmac_key: ""
+  # 验证方式配置
+  challenge_type: "http-01"   # 挑战类型: http-01 或 dns-01
+  # DNS-01 配置（使用 DNS 验证时填写，不需要开放 80 端口，支持通配符证书）
+  dns_provider: ""            # DNS 提供商: cloudflare, alidns, tencentcloud
+  dns_config: ""              # DNS 配置（JSON 格式），如：
+                              # Cloudflare: {"api_token": "your-api-token"}
+                              # 阿里云: {"access_key_id": "xxx", "access_key_secret": "xxx"}
+                              # 腾讯云: {"secret_id": "xxx", "secret_key": "xxx"}
+
 # 客户端配置列表
 # 每个客户端可以配置专属密钥和分配的隧道
 clients:

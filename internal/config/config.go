@@ -13,6 +13,7 @@ type ServerConfig struct {
 	Server  ServerSettings   `yaml:"server" json:"server"`
 	Clients []ClientSettings `yaml:"clients" json:"clients"`
 	Log     LogSettings      `yaml:"log" json:"log"`
+	ACME    *ACMESettings    `yaml:"acme" json:"acme"` // ACME自动证书配置
 }
 
 // ServerSettings 服务端设置
@@ -43,6 +44,27 @@ type WebTLS struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`     // 是否启用HTTPS
 	CertFile string `yaml:"cert_file" json:"cert_file"` // 证书文件路径（PEM）
 	KeyFile  string `yaml:"key_file" json:"key_file"`   // 私钥文件路径（PEM）
+}
+
+// ACMESettings ACME自动证书配置
+type ACMESettings struct {
+	Enabled       bool     `yaml:"enabled" json:"enabled"`               // 是否启用ACME
+	Email         string   `yaml:"email" json:"email"`                   // 注册邮箱
+	Domains       []string `yaml:"domains" json:"domains"`               // 申请证书的域名列表
+	CAServer      string   `yaml:"ca_server" json:"ca_server"`           // CA服务器（可选，默认Let's Encrypt）
+	AcceptTOS     bool     `yaml:"accept_tos" json:"accept_tos"`         // 是否同意服务条款
+	RenewBefore   int      `yaml:"renew_before" json:"renew_before"`     // 证书到期前多少天续签（默认30天）
+	HTTPPort      int      `yaml:"http_port" json:"http_port"`           // HTTP-01挑战端口（默认80）
+	DataDir       string   `yaml:"data_dir" json:"data_dir"`             // ACME数据存储目录
+	AutoRenew     bool     `yaml:"auto_renew" json:"auto_renew"`         // 是否自动续签
+	RenewInterval int      `yaml:"renew_interval" json:"renew_interval"` // 续签检查间隔（小时，默认24）
+	EABEnabled    bool     `yaml:"eab_enabled" json:"eab_enabled"`       // 是否启用EAB（External Account Binding）
+	EABKid        string   `yaml:"eab_kid" json:"eab_kid"`               // EAB Key ID
+	EABHmacKey    string   `yaml:"eab_hmac_key" json:"eab_hmac_key"`     // EAB HMAC Key
+	// DNS-01 挑战配置
+	ChallengeType string `yaml:"challenge_type" json:"challenge_type"` // 挑战类型: http-01 或 dns-01
+	DNSProvider   string `yaml:"dns_provider" json:"dns_provider"`     // DNS提供商: cloudflare, alidns, tencentcloud 等
+	DNSConfig     string `yaml:"dns_config" json:"dns_config"`         // DNS提供商配置（JSON格式）
 }
 
 // ClientSettings 客户端配置（服务端侧）
@@ -102,6 +124,21 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 	if config.Server.WebTLS == nil {
 		config.Server.WebTLS = &WebTLS{}
+	}
+	if config.ACME == nil {
+		config.ACME = &ACMESettings{}
+	}
+	if config.ACME.RenewBefore <= 0 {
+		config.ACME.RenewBefore = 30
+	}
+	if config.ACME.HTTPPort <= 0 {
+		config.ACME.HTTPPort = 80
+	}
+	if config.ACME.RenewInterval <= 0 {
+		config.ACME.RenewInterval = 24
+	}
+	if config.ACME.DataDir == "" {
+		config.ACME.DataDir = "acme"
 	}
 	if config.Log.Level == "" {
 		config.Log.Level = "info"
