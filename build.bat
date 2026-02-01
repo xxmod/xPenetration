@@ -14,11 +14,19 @@ echo Version: %VERSION%
 :: 设置 ldflags
 set LDFLAGS=-X main.version=%VERSION%
 
-:: 编译服务端
-echo Building server...
+:: 编译服务端（不含 ACME）
+echo Building server (no ACME)...
 go build -ldflags "%LDFLAGS%" -o bin/xpen-server.exe ./cmd/server
 if %errorlevel% neq 0 (
     echo Failed to build server
+    exit /b 1
+)
+
+:: 编译带 ACME 的服务端
+echo Building server with ACME...
+go build -tags acme -ldflags "%LDFLAGS%" -o bin/xpen-server-with-acme.exe ./cmd/server
+if %errorlevel% neq 0 (
+    echo Failed to build server with ACME
     exit /b 1
 )
 
@@ -34,4 +42,5 @@ echo.
 echo Build completed successfully!
 echo Output:
 echo   bin/xpen-server.exe
+echo   bin/xpen-server-with-acme.exe
 echo   bin/xpen-client.exe

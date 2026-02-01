@@ -23,10 +23,12 @@ BIN_DIR=bin
 
 # 输出文件
 SERVER_BINARY=$(BIN_DIR)/xpen-server
+SERVER_BINARY_ACME=$(BIN_DIR)/xpen-server-with-acme
 CLIENT_BINARY=$(BIN_DIR)/xpen-client
 
 # Windows输出文件
 SERVER_BINARY_WIN=$(BIN_DIR)/xpen-server.exe
+SERVER_BINARY_WIN_ACME=$(BIN_DIR)/xpen-server-with-acme.exe
 CLIENT_BINARY_WIN=$(BIN_DIR)/xpen-client.exe
 
 all: build
@@ -37,6 +39,7 @@ server:
 	@echo "Building server... (version: $(VERSION))"
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY) ./cmd/server
+	$(GOBUILD) -tags acme -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY_ACME) ./cmd/server
 
 client:
 	@echo "Building client... (version: $(VERSION))"
@@ -48,6 +51,7 @@ build-windows:
 	@echo "Building for Windows... (version: $(VERSION))"
 	@mkdir -p $(BIN_DIR)
 	GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY_WIN) ./cmd/server
+	GOOS=windows GOARCH=amd64 $(GOBUILD) -tags acme -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY_WIN_ACME) ./cmd/server
 	GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS)" -o $(CLIENT_BINARY_WIN) ./cmd/client
 
 # 交叉编译 Linux
@@ -55,6 +59,7 @@ build-linux:
 	@echo "Building for Linux... (version: $(VERSION))"
 	@mkdir -p $(BIN_DIR)
 	GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY) ./cmd/server
+	GOOS=linux GOARCH=amd64 $(GOBUILD) -tags acme -ldflags "$(LDFLAGS)" -o $(SERVER_BINARY_ACME) ./cmd/server
 	GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS)" -o $(CLIENT_BINARY) ./cmd/client
 
 clean:

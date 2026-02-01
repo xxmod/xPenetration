@@ -72,12 +72,16 @@ jobs:
           mkdir -p dist
           # 构建多平台二进制文件，注入版本号
           GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-linux-amd64 ./cmd/server
+          GOOS=linux GOARCH=amd64 go build -tags acme -ldflags "$LDFLAGS" -o dist/xpen-server-with-acme-linux-amd64 ./cmd/server
           GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-linux-amd64 ./cmd/client
           GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-windows-amd64.exe ./cmd/server
+          GOOS=windows GOARCH=amd64 go build -tags acme -ldflags "$LDFLAGS" -o dist/xpen-server-with-acme-windows-amd64.exe ./cmd/server
           GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-windows-amd64.exe ./cmd/client
           GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-darwin-amd64 ./cmd/server
+          GOOS=darwin GOARCH=amd64 go build -tags acme -ldflags "$LDFLAGS" -o dist/xpen-server-with-acme-darwin-amd64 ./cmd/server
           GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-darwin-amd64 ./cmd/client
           GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/xpen-server-darwin-arm64 ./cmd/server
+          GOOS=darwin GOARCH=arm64 go build -tags acme -ldflags "$LDFLAGS" -o dist/xpen-server-with-acme-darwin-arm64 ./cmd/server
           GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/xpen-client-darwin-arm64 ./cmd/client
 
       - name: Create Release

@@ -19,25 +19,31 @@ import (
 	"sync"
 	"time"
 
-	"xpenetration/internal/acme"
 	"xpenetration/internal/config"
 )
+
+// acmeProvider is implemented in build-tagged files to optionally include ACME support.
+// In non-ACME builds, a stub keeps the server/web UI functional without the ACME module.
+type acmeProvider interface {
+	registerRoutes(mux *http.ServeMux)
+	init(cfg *config.ServerConfig)
+	stop()
+}
 
 //go:embed web/*
 var webFS embed.FS
 
 // WebServer Web管理服务
 type WebServer struct {
-	server      *Server
-	addr        string
-	mux         *http.ServeMux
-	configPath  string
-	mu          sync.Mutex
-	httpServer  *http.Server
-	redirect    *http.Server
-	listener    net.Listener
-	acmeManager *acme.Manager // ACME管理器
-	acmeServer  *http.Server  // ACME HTTP-01挑战服务器
+	server     *Server
+	addr       string
+	mux        *http.ServeMux
+	configPath string
+	mu         sync.Mutex
+	httpServer *http.Server
+	redirect   *http.Server
+	listener   net.Listener
+	acme       acmeProvider
 }
 
 // NewWebServer 创建Web服务器
@@ -48,6 +54,7 @@ func NewWebServer(server *Server, addr string, configPath string) *WebServer {
 		mux:        http.NewServeMux(),
 		configPath: configPath,
 	}
+	ws.acme = newACMEProvider(ws)
 	ws.setupRoutes()
 	return ws
 }
@@ -64,13 +71,7 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/api/webtls/upload/cert", ws.handleUploadCert)
 	ws.mux.HandleFunc("/api/webtls/upload/key", ws.handleUploadKey)
 	ws.mux.HandleFunc("/api/logs", ws.handleLogs)
-	// ACME API
-	ws.mux.HandleFunc("/api/acme/status", ws.handleACMEStatus)
-	ws.mux.HandleFunc("/api/acme/config", ws.handleACMEConfig)
-	ws.mux.HandleFunc("/api/acme/obtain", ws.handleACMEObtain)
-	ws.mux.HandleFunc("/api/acme/renew", ws.handleACMERenew)
-	ws.mux.HandleFunc("/api/acme/ca-servers", ws.handleACMECAServers)
-	ws.mux.HandleFunc("/api/acme/dns-providers", ws.handleACMEDNSProviders)
+	ws.acme.registerRoutes(ws.mux)
 	// 兼容 /status 与 /status/（部分监控探针不一定带尾部斜杠）
 	ws.mux.HandleFunc("/status", ws.handleStatus)
 	ws.mux.HandleFunc("/status/", ws.handleStatus)
@@ -89,67 +90,8 @@ func (ws *WebServer) setupRoutes() {
 // Start 启动Web服务器
 func (ws *WebServer) Start() error {
 	cfg := ws.server.GetConfig()
-
-	// 初始化 ACME 管理器
-	if cfg.ACME != nil && cfg.ACME.Enabled {
-		ws.initACME(cfg)
-	}
-
+	ws.acme.init(cfg)
 	return ws.startWithConfig(cfg)
-}
-
-// initACME 初始化 ACME 管理器
-func (ws *WebServer) initACME(cfg *config.ServerConfig) {
-	if cfg.ACME == nil {
-		return
-	}
-
-	acmeCfg := &acme.ACMEConfig{
-		Enabled:       cfg.ACME.Enabled,
-		Email:         cfg.ACME.Email,
-		Domains:       cfg.ACME.Domains,
-		CAServer:      cfg.ACME.CAServer,
-		AcceptTOS:     cfg.ACME.AcceptTOS,
-		RenewBefore:   cfg.ACME.RenewBefore,
-		HTTPPort:      cfg.ACME.HTTPPort,
-		DataDir:       cfg.ACME.DataDir,
-		AutoRenew:     cfg.ACME.AutoRenew,
-		RenewInterval: cfg.ACME.RenewInterval,
-		EABEnabled:    cfg.ACME.EABEnabled,
-		EABKid:        cfg.ACME.EABKid,
-		EABHmacKey:    cfg.ACME.EABHmacKey,
-		ChallengeType: cfg.ACME.ChallengeType,
-		DNSProvider:   cfg.ACME.DNSProvider,
-		DNSConfig:     cfg.ACME.DNSConfig,
-	}
-
-	ws.acmeManager = acme.NewManager(acmeCfg)
-
-	// 设置证书续签回调
-	ws.acmeManager.SetOnCertRenewed(func(certFile, keyFile string) {
-		log.Printf("[ACME] Certificate renewed, updating WebTLS config...")
-		// 自动更新 WebTLS 配置
-		ws.updateWebTLSFromACME(certFile, keyFile)
-	})
-
-	// 初始化
-	if err := ws.acmeManager.Initialize(); err != nil {
-		log.Printf("[ACME] Failed to initialize: %v", err)
-		return
-	}
-
-	// 启动 HTTP-01 挑战服务器
-	if cfg.ACME.HTTPPort > 0 {
-		go ws.startACMEChallengeServer(cfg.ACME.HTTPPort)
-	}
-
-	// 启动自动续签
-	ws.acmeManager.Start()
-
-	// 检查是否已有证书，如果有则自动应用到 WebTLS
-	if certInfo := ws.acmeManager.GetCertificateInfo(); certInfo != nil {
-		ws.updateWebTLSFromACME(certInfo.CertFile, certInfo.KeyFile)
-	}
 }
 
 // corsMiddleware CORS中间件
@@ -380,17 +322,12 @@ func (ws *WebServer) Stop() {
 	srv := ws.httpServer
 	redir := ws.redirect
 	ln := ws.listener
-	acmeSrv := ws.acmeServer
 	ws.httpServer = nil
 	ws.redirect = nil
 	ws.listener = nil
-	ws.acmeServer = nil
 	ws.mu.Unlock()
 
-	// 停止 ACME 管理器
-	if ws.acmeManager != nil {
-		ws.acmeManager.Stop()
-	}
+	ws.acme.stop()
 
 	if srv == nil {
 		return
@@ -402,9 +339,6 @@ func (ws *WebServer) Stop() {
 	}
 	if redir != nil {
 		redir.Shutdown(ctx)
-	}
-	if acmeSrv != nil {
-		acmeSrv.Shutdown(ctx)
 	}
 	if ln != nil {
 		ln.Close()
@@ -593,281 +527,4 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
-}
-
-// ==================== ACME 相关处理函数 ====================
-
-// startACMEChallengeServer 启动 ACME HTTP-01 挑战服务器
-func (ws *WebServer) startACMEChallengeServer(port int) {
-	if ws.acmeManager == nil {
-		return
-	}
-
-	challengeProvider := ws.acmeManager.GetChallengeProvider()
-	if challengeProvider == nil {
-		return
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/acme-challenge/", func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
-		keyAuth, ok := challengeProvider.GetToken(token)
-		if !ok {
-			log.Printf("[ACME] Challenge token not found: %s", token)
-			http.NotFound(w, r)
-			return
-		}
-		log.Printf("[ACME] Serving challenge response for token: %s", token)
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(keyAuth))
-	})
-
-	addr := fmt.Sprintf(":%d", port)
-	ws.acmeServer = &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	log.Printf("[ACME] HTTP-01 challenge server listening on %s", addr)
-	if err := ws.acmeServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("[ACME] Challenge server error: %v", err)
-	}
-}
-
-// updateWebTLSFromACME 使用 ACME 证书更新 WebTLS 配置
-func (ws *WebServer) updateWebTLSFromACME(certFile, keyFile string) {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	cfg := ws.server.GetConfig()
-	if cfg == nil {
-		return
-	}
-
-	// 检查证书文件是否存在
-	if _, err := os.Stat(certFile); err != nil {
-		log.Printf("[ACME] Certificate file not found: %s", certFile)
-		return
-	}
-	if _, err := os.Stat(keyFile); err != nil {
-		log.Printf("[ACME] Key file not found: %s", keyFile)
-		return
-	}
-
-	// 更新配置
-	if cfg.Server.WebTLS == nil {
-		cfg.Server.WebTLS = &config.WebTLS{}
-	}
-	cfg.Server.WebTLS.Enabled = true
-	cfg.Server.WebTLS.CertFile = certFile
-	cfg.Server.WebTLS.KeyFile = keyFile
-
-	// 保存配置
-	if err := config.SaveServerConfig(ws.configPath, cfg); err != nil {
-		log.Printf("[ACME] Failed to save WebTLS config: %v", err)
-		return
-	}
-
-	log.Printf("[ACME] WebTLS config updated with ACME certificate")
-}
-
-// handleACMEStatus 处理 ACME 状态请求
-func (ws *WebServer) handleACMEStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if ws.acmeManager == nil {
-		ws.writeJSON(w, map[string]interface{}{
-			"enabled":    false,
-			"configured": false,
-			"message":    "ACME not initialized",
-		})
-		return
-	}
-
-	status := ws.acmeManager.GetStatus()
-	ws.writeJSON(w, status)
-}
-
-// handleACMEConfig 处理 ACME 配置请求
-func (ws *WebServer) handleACMEConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		ws.handleACMEConfigGet(w, r)
-	case http.MethodPost:
-		ws.handleACMEConfigPost(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleACMEConfigGet 获取 ACME 配置
-func (ws *WebServer) handleACMEConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg := ws.server.GetConfig()
-	if cfg == nil || cfg.ACME == nil {
-		ws.writeJSON(w, &config.ACMESettings{})
-		return
-	}
-	ws.writeJSON(w, cfg.ACME)
-}
-
-// handleACMEConfigPost 保存 ACME 配置
-func (ws *WebServer) handleACMEConfigPost(w http.ResponseWriter, r *http.Request) {
-	var newACMEConfig config.ACMESettings
-	if err := json.NewDecoder(r.Body).Decode(&newACMEConfig); err != nil {
-		http.Error(w, "Invalid config format", http.StatusBadRequest)
-		return
-	}
-
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	// 更新配置
-	cfg := ws.server.GetConfig()
-	if cfg == nil {
-		http.Error(w, "Server config not found", http.StatusInternalServerError)
-		return
-	}
-
-	cfg.ACME = &newACMEConfig
-
-	// 保存配置到文件
-	if err := config.SaveServerConfig(ws.configPath, cfg); err != nil {
-		log.Printf("[ACME] Failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	// 重新初始化 ACME 管理器
-	if ws.acmeManager != nil {
-		ws.acmeManager.Stop()
-	}
-
-	if newACMEConfig.Enabled {
-		acmeCfg := &acme.ACMEConfig{
-			Enabled:       newACMEConfig.Enabled,
-			Email:         newACMEConfig.Email,
-			Domains:       newACMEConfig.Domains,
-			CAServer:      newACMEConfig.CAServer,
-			AcceptTOS:     newACMEConfig.AcceptTOS,
-			RenewBefore:   newACMEConfig.RenewBefore,
-			HTTPPort:      newACMEConfig.HTTPPort,
-			DataDir:       newACMEConfig.DataDir,
-			AutoRenew:     newACMEConfig.AutoRenew,
-			RenewInterval: newACMEConfig.RenewInterval,
-			EABEnabled:    newACMEConfig.EABEnabled,
-			EABKid:        newACMEConfig.EABKid,
-			EABHmacKey:    newACMEConfig.EABHmacKey,
-			ChallengeType: newACMEConfig.ChallengeType,
-			DNSProvider:   newACMEConfig.DNSProvider,
-			DNSConfig:     newACMEConfig.DNSConfig,
-		}
-
-		ws.acmeManager = acme.NewManager(acmeCfg)
-		ws.acmeManager.SetOnCertRenewed(func(certFile, keyFile string) {
-			log.Printf("[ACME] Certificate renewed, updating WebTLS config...")
-			ws.updateWebTLSFromACME(certFile, keyFile)
-		})
-
-		if err := ws.acmeManager.Initialize(); err != nil {
-			log.Printf("[ACME] Failed to initialize: %v", err)
-			ws.writeJSON(w, map[string]interface{}{
-				"success": false,
-				"message": fmt.Sprintf("Failed to initialize ACME: %v", err),
-			})
-			return
-		}
-
-		// 启动 HTTP-01 挑战服务器
-		if newACMEConfig.HTTPPort > 0 && ws.acmeServer == nil {
-			go ws.startACMEChallengeServer(newACMEConfig.HTTPPort)
-		}
-
-		// 启动自动续签
-		ws.acmeManager.Start()
-	}
-
-	log.Printf("[ACME] Config saved and applied")
-	ws.writeJSON(w, map[string]interface{}{
-		"success": true,
-		"message": "ACME config saved",
-	})
-}
-
-// handleACMEObtain 手动申请证书
-func (ws *WebServer) handleACMEObtain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if ws.acmeManager == nil {
-		http.Error(w, "ACME not initialized", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("[ACME] Manual certificate obtain requested")
-
-	go func() {
-		if err := ws.acmeManager.ObtainCertificate(); err != nil {
-			log.Printf("[ACME] Failed to obtain certificate: %v", err)
-		}
-	}()
-
-	ws.writeJSON(w, map[string]interface{}{
-		"success": true,
-		"message": "Certificate obtain started, please check status later",
-	})
-}
-
-// handleACMERenew 手动续签证书
-func (ws *WebServer) handleACMERenew(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if ws.acmeManager == nil {
-		http.Error(w, "ACME not initialized", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("[ACME] Manual certificate renewal requested")
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := ws.acmeManager.ForceRenew(ctx); err != nil {
-			log.Printf("[ACME] Failed to renew certificate: %v", err)
-		}
-	}()
-
-	ws.writeJSON(w, map[string]interface{}{
-		"success": true,
-		"message": "Certificate renewal started, please check status later",
-	})
-}
-
-// handleACMECAServers 获取可用的 CA 服务器列表
-func (ws *WebServer) handleACMECAServers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	servers := acme.GetCAServers()
-	ws.writeJSON(w, servers)
-}
-
-// handleACMEDNSProviders 获取支持的 DNS 提供商列表
-func (ws *WebServer) handleACMEDNSProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	providers := acme.GetDNSProviders()
-	ws.writeJSON(w, providers)
 }
