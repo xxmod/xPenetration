@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1474,6 +1475,8 @@ func (m *Metrics) updateLastPacket(tm *TunnelMetrics) {
 }
 
 func (m *Metrics) Snapshot() MetricsSnapshot {
+	now := time.Now()
+	cutoff := now.Add(-2 * time.Hour).UnixNano()
 	lastPkt := m.lastPacketAt.Load()
 	snap := MetricsSnapshot{
 		StartTime:     m.startTime,
@@ -1493,8 +1496,14 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 
 	m.tunnelMu.RLock()
 	snap.Tunnels = make([]TunnelMetricsSnapshot, 0, len(m.tunnels))
-	for _, tm := range m.tunnels {
+	stale := make([]string, 0)
+	for name, tm := range m.tunnels {
 		tLast := tm.lastPacketAt.Load()
+		if tLast == 0 || tLast < cutoff {
+			stale = append(stale, name)
+			continue
+		}
+
 		snap.Tunnels = append(snap.Tunnels, TunnelMetricsSnapshot{
 			TunnelName:    tm.TunnelName,
 			Protocol:      tm.Protocol,
@@ -1513,6 +1522,23 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		})
 	}
 	m.tunnelMu.RUnlock()
+
+	if len(stale) > 0 {
+		m.tunnelMu.Lock()
+		for _, name := range stale {
+			if tm, ok := m.tunnels[name]; ok {
+				tLast := tm.lastPacketAt.Load()
+				if tLast == 0 || tLast < cutoff {
+					delete(m.tunnels, name)
+				}
+			}
+		}
+		m.tunnelMu.Unlock()
+	}
+
+	sort.Slice(snap.Tunnels, func(i, j int) bool {
+		return snap.Tunnels[i].TunnelName < snap.Tunnels[j].TunnelName
+	})
 
 	return snap
 }
