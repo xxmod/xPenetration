@@ -207,6 +207,19 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 验证配置合法性
+		if validationErrors := config.ValidateServerConfig(&newConfig); len(validationErrors) > 0 {
+			log.Printf("[WebServer] Config validation failed: %v", validationErrors)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "error",
+				"message": "配置验证失败",
+				"errors":  validationErrors,
+			})
+			return
+		}
+
 		// 保存到文件
 		if err := config.SaveServerConfig(ws.configPath, &newConfig); err != nil {
 			log.Printf("[WebServer] Failed to save config: %v", err)

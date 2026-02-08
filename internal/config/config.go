@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 
 	"xpenetration/internal/protocol"
@@ -180,6 +181,99 @@ func LoadClientConfig(path string) (*ClientConnConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// ValidateServerConfig 验证服务端配置的合法性
+// 检查客户端名称重复、隧道名称重复、端口冲突等
+func ValidateServerConfig(cfg *ServerConfig) []string {
+	var errors []string
+
+	// 收集服务端自身占用的端口
+	reservedPorts := map[int]string{}
+	if cfg.Server.ControlPort > 0 {
+		reservedPorts[cfg.Server.ControlPort] = "服务端控制端口"
+	}
+	if cfg.Server.UDPPort > 0 {
+		reservedPorts[cfg.Server.UDPPort] = "服务端UDP端口"
+	}
+	if cfg.Server.WebPort > 0 {
+		reservedPorts[cfg.Server.WebPort] = "Web管理端口"
+	}
+
+	// 检查服务端端口之间是否互相冲突
+	portValues := []struct {
+		port int
+		name string
+	}{
+		{cfg.Server.ControlPort, "控制端口"},
+		{cfg.Server.UDPPort, "UDP端口"},
+		{cfg.Server.WebPort, "Web管理端口"},
+	}
+	for i := 0; i < len(portValues); i++ {
+		for j := i + 1; j < len(portValues); j++ {
+			if portValues[i].port > 0 && portValues[i].port == portValues[j].port {
+				errors = append(errors, fmt.Sprintf("服务端端口冲突：%s 和 %s 使用了相同的端口 %d",
+					portValues[i].name, portValues[j].name, portValues[i].port))
+			}
+		}
+	}
+
+	// 检查客户端名称重复
+	clientNames := map[string]int{}
+	for idx, client := range cfg.Clients {
+		name := client.Name
+		if name == "" {
+			errors = append(errors, fmt.Sprintf("第 %d 个客户端名称为空", idx+1))
+			continue
+		}
+		if prevIdx, exists := clientNames[name]; exists {
+			errors = append(errors, fmt.Sprintf("客户端名称重复：\"%s\" (第 %d 和第 %d 个客户端)", name, prevIdx+1, idx+1))
+		} else {
+			clientNames[name] = idx
+		}
+	}
+
+	// 检查隧道名称重复和端口冲突
+	tunnelNames := map[string]string{} // tunnelName -> clientName
+	serverPorts := map[int]string{}    // serverPort -> "clientName/tunnelName"
+	for _, client := range cfg.Clients {
+		for _, tunnel := range client.Tunnels {
+			tunnelKey := client.Name + "/" + tunnel.Name
+
+			// 检查隧道名称是否为空
+			if tunnel.Name == "" {
+				errors = append(errors, fmt.Sprintf("客户端 \"%s\" 存在未命名的隧道", client.Name))
+				continue
+			}
+
+			// 检查隧道名称重复（全局唯一）
+			if ownerClient, exists := tunnelNames[tunnel.Name]; exists {
+				errors = append(errors, fmt.Sprintf("隧道名称重复：\"%s\" (客户端 \"%s\" 和 \"%s\")",
+					tunnel.Name, ownerClient, client.Name))
+			} else {
+				tunnelNames[tunnel.Name] = client.Name
+			}
+
+			// 检查隧道服务端端口是否冲突
+			if tunnel.ServerPort > 0 {
+				// 与其他隧道的端口冲突
+				if existingTunnel, exists := serverPorts[tunnel.ServerPort]; exists {
+					errors = append(errors, fmt.Sprintf("隧道端口冲突：端口 %d 被 \"%s\" 和 \"%s\" 同时使用",
+						tunnel.ServerPort, existingTunnel, tunnelKey))
+				} else {
+					serverPorts[tunnel.ServerPort] = tunnelKey
+				}
+
+				// 与服务端保留端口冲突
+				if reservedName, exists := reservedPorts[tunnel.ServerPort]; exists {
+					errors = append(errors, fmt.Sprintf("隧道端口冲突：隧道 \"%s\" 的端口 %d 与%s冲突",
+						tunnelKey, tunnel.ServerPort, reservedName))
+				}
+			}
+		}
+	}
+
+	return errors
 }
 
 // SaveServerConfig 保存服务端配置

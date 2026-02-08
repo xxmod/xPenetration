@@ -932,7 +932,12 @@
                         }, 2000);
                     } catch (e) {
                         console.error('Failed to save config', e);
-                        alert('保存配置失败: ' + e.message);
+                        if (e.response && e.response.data && e.response.data.errors) {
+                            const errs = e.response.data.errors;
+                            alert('配置验证失败:\n\n' + errs.map((msg, i) => (i + 1) + '. ' + msg).join('\n'));
+                        } else {
+                            alert('保存配置失败: ' + (e.response ? e.response.data : e.message));
+                        }
                     } finally {
                         this.saving = false;
                     }
