@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"xpenetration/internal/protocol"
@@ -361,17 +365,23 @@ func CheckPortsAvailability(newCfg *ServerConfig, currentCfg *ServerConfig) []st
 	return conflicts
 }
 
-// checkTCPPort 尝试监听 TCP 端口，返回空字符串表示可用，否则返回错误描述
+// checkTCPPort 尝试监听 TCP 端口，返回空字符串表示可用，否则返回错误描述（含占用进程信息）
 func checkTCPPort(addr string) string {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		// 解析端口号
+		port := parsePort(addr)
+		procInfo := findProcessByPort(port, "tcp")
+		if procInfo != "" {
+			return fmt.Sprintf("已被占用 (%s)", procInfo)
+		}
 		return "已被其他程序占用"
 	}
 	ln.Close()
 	return ""
 }
 
-// checkUDPPort 尝试监听 UDP 端口，返回空字符串表示可用，否则返回错误描述
+// checkUDPPort 尝试监听 UDP 端口，返回空字符串表示可用，否则返回错误描述（含占用进程信息）
 func checkUDPPort(addr string) string {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -379,10 +389,156 @@ func checkUDPPort(addr string) string {
 	}
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
+		port := parsePort(addr)
+		procInfo := findProcessByPort(port, "udp")
+		if procInfo != "" {
+			return fmt.Sprintf("已被占用 (%s)", procInfo)
+		}
 		return "已被其他程序占用"
 	}
 	conn.Close()
 	return ""
+}
+
+// parsePort 从 ":port" 格式地址中提取端口号
+func parsePort(addr string) int {
+	parts := strings.Split(addr, ":")
+	if len(parts) > 0 {
+		p, _ := strconv.Atoi(parts[len(parts)-1])
+		return p
+	}
+	return 0
+}
+
+// findProcessByPort 查找占用指定端口的进程信息，返回 "进程名 (PID: xxx)" 或空字符串
+func findProcessByPort(port int, proto string) string {
+	if port <= 0 {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return findProcessWindows(port, proto)
+	default:
+		return findProcessLinux(port, proto)
+	}
+}
+
+// findProcessWindows 在 Windows 上通过 netstat + tasklist 查找占用端口的进程
+func findProcessWindows(port int, proto string) string {
+	// netstat -ano 输出格式：
+	//   TCP    0.0.0.0:7000    0.0.0.0:0    LISTENING    12345
+	//   UDP    0.0.0.0:7001    *:*                       12345
+	out, err := exec.Command("netstat", "-ano").Output()
+	if err != nil {
+		return ""
+	}
+
+	portStr := fmt.Sprintf(":%d ", port)
+	protoUpper := strings.ToUpper(proto)
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(line), protoUpper) {
+			continue
+		}
+		if !strings.Contains(line, portStr) {
+			continue
+		}
+		// 对 TCP 只匹配 LISTENING 状态
+		if protoUpper == "TCP" && !strings.Contains(strings.ToUpper(line), "LISTENING") {
+			continue
+		}
+		// 提取末尾 PID
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		pidStr := fields[len(fields)-1]
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		name := getProcessNameWindows(pid)
+		if name != "" {
+			return fmt.Sprintf("%s, PID: %d", name, pid)
+		}
+		return fmt.Sprintf("PID: %d", pid)
+	}
+	return ""
+}
+
+// getProcessNameWindows 通过 tasklist 获取进程名
+func getProcessNameWindows(pid int) string {
+	out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return ""
+	}
+	// 输出格式: "进程名","PID","会话名","会话#","内存使用"
+	line := strings.TrimSpace(string(out))
+	if strings.HasPrefix(line, "\"") {
+		parts := strings.SplitN(line, ",", 3)
+		if len(parts) >= 1 {
+			return strings.Trim(parts[0], "\"")
+		}
+	}
+	return ""
+}
+
+// findProcessLinux 在 Linux/macOS 上通过 ss 或 lsof 查找占用端口的进程
+func findProcessLinux(port int, proto string) string {
+	// 优先尝试 ss（Linux）
+	if info := findProcessBySS(port, proto); info != "" {
+		return info
+	}
+	// 回退到 lsof（macOS / 其他 Unix）
+	return findProcessByLsof(port, proto)
+}
+
+// findProcessBySS 使用 ss -lpn 查找占用端口的进程
+func findProcessBySS(port int, proto string) string {
+	filter := "tcp"
+	if strings.EqualFold(proto, "udp") {
+		filter = "udp"
+	}
+	out, err := exec.Command("ss", "-lpn", "state", "listening", "sport", "=", fmt.Sprintf(":%d", port)).Output()
+	if err != nil {
+		// ss 不一定在所有系统上可用
+		return ""
+	}
+	_ = filter
+	// ss 输出中进程信息格式: users:(("nginx",pid=1234,fd=5))
+	re := regexp.MustCompile(`\("([^"]+)",pid=(\d+)`)
+	matches := re.FindStringSubmatch(string(out))
+	if len(matches) >= 3 {
+		return fmt.Sprintf("%s, PID: %s", matches[1], matches[2])
+	}
+	return ""
+}
+
+// findProcessByLsof 使用 lsof 查找占用端口的进程
+func findProcessByLsof(port int, proto string) string {
+	protoArg := "TCP"
+	if strings.EqualFold(proto, "udp") {
+		protoArg = "UDP"
+	}
+	out, err := exec.Command("lsof", "-i", fmt.Sprintf("%s:%d", protoArg, port), "-sTCP:LISTEN", "-nP", "-t").Output()
+	if err != nil {
+		return ""
+	}
+	pidStr := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return ""
+	}
+	// 获取进程名
+	nameOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err == nil {
+		name := strings.TrimSpace(string(nameOut))
+		if name != "" {
+			return fmt.Sprintf("%s, PID: %d", name, pid)
+		}
+	}
+	return fmt.Sprintf("PID: %d", pid)
 }
 
 // SaveServerConfig 保存服务端配置
