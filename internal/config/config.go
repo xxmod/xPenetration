@@ -241,7 +241,8 @@ func ValidateServerConfig(cfg *ServerConfig) []string {
 
 	// 检查隧道名称重复和端口冲突
 	tunnelNames := map[string]string{} // tunnelName -> clientName
-	serverPorts := map[int]string{}    // serverPort -> "clientName/tunnelName"
+	// 使用 "协议:端口" 作为key，TCP和UDP可以共用同一端口号
+	serverPorts := map[string]string{} // "protocol:serverPort" -> "clientName/tunnelName"
 	for _, client := range cfg.Clients {
 		for _, tunnel := range client.Tunnels {
 			tunnelKey := client.Name + "/" + tunnel.Name
@@ -262,18 +263,32 @@ func ValidateServerConfig(cfg *ServerConfig) []string {
 
 			// 检查隧道服务端端口是否冲突
 			if tunnel.ServerPort > 0 {
-				// 与其他隧道的端口冲突
-				if existingTunnel, exists := serverPorts[tunnel.ServerPort]; exists {
-					errors = append(errors, fmt.Sprintf("隧道端口冲突：端口 %d 被 \"%s\" 和 \"%s\" 同时使用",
-						tunnel.ServerPort, existingTunnel, tunnelKey))
+				// 确定协议类型，默认为tcp
+				proto := "tcp"
+				if strings.EqualFold(tunnel.Protocol, "udp") {
+					proto = "udp"
+				}
+				portKey := fmt.Sprintf("%s:%d", proto, tunnel.ServerPort)
+
+				// 与其他隧道的端口冲突（同协议同端口才算冲突）
+				if existingTunnel, exists := serverPorts[portKey]; exists {
+					errors = append(errors, fmt.Sprintf("隧道端口冲突：%s 端口 %d 被 \"%s\" 和 \"%s\" 同时使用",
+						strings.ToUpper(proto), tunnel.ServerPort, existingTunnel, tunnelKey))
 				} else {
-					serverPorts[tunnel.ServerPort] = tunnelKey
+					serverPorts[portKey] = tunnelKey
 				}
 
-				// 与服务端保留端口冲突
+				// 与服务端保留端口冲突（服务端控制端口和Web端口为TCP，UDP端口为UDP）
 				if reservedName, exists := reservedPorts[tunnel.ServerPort]; exists {
-					errors = append(errors, fmt.Sprintf("隧道端口冲突：隧道 \"%s\" 的端口 %d 与%s冲突",
-						tunnelKey, tunnel.ServerPort, reservedName))
+					// 判断保留端口的协议类型是否与隧道冲突
+					reservedProto := "tcp"
+					if tunnel.ServerPort == cfg.Server.UDPPort {
+						reservedProto = "udp"
+					}
+					if reservedProto == proto {
+						errors = append(errors, fmt.Sprintf("隧道端口冲突：隧道 \"%s\" 的 %s 端口 %d 与%s冲突",
+							tunnelKey, strings.ToUpper(proto), tunnel.ServerPort, reservedName))
+					}
 				}
 			}
 		}
