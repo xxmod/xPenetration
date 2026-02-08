@@ -399,12 +399,15 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 			return
 		}
 
-		// 保存客户端的UDP地址
+		// 保存客户端的UDP地址，仅在地址变化时打印日志
 		s.mu.Lock()
+		oldAddr, existed := s.clientUDPAddrs[regPkt.ClientName]
 		s.clientUDPAddrs[regPkt.ClientName] = clientUDPAddr
 		s.mu.Unlock()
 
-		log.Printf("[Server] Registered UDP address for client %s: %s", regPkt.ClientName, clientUDPAddr.String())
+		if !existed || oldAddr.String() != clientUDPAddr.String() {
+			log.Printf("[Server] Registered UDP address for client %s: %s", regPkt.ClientName, clientUDPAddr.String())
+		}
 		return
 	}
 

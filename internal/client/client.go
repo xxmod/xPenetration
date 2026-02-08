@@ -482,10 +482,8 @@ func (c *Client) sendUDPRegisterPacket() {
 
 	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName)
 	_, err := conn.WriteToUDP(registerPkt, addr)
-	if err != nil {
+	if err != nil && c.connected {
 		log.Printf("[Client] Warning: Failed to send UDP register packet: %v", err)
-	} else {
-		log.Printf("[Client] Sent UDP register packet to server")
 	}
 }
 
