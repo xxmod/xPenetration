@@ -220,6 +220,20 @@ func (ws *WebServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 检查端口是否被系统其他程序占用
+		currentCfg := ws.server.GetConfig()
+		if portConflicts := config.CheckPortsAvailability(&newConfig, currentCfg); len(portConflicts) > 0 {
+			log.Printf("[WebServer] Port availability check failed: %v", portConflicts)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "error",
+				"message": "端口被占用",
+				"errors":  portConflicts,
+			})
+			return
+		}
+
 		// 保存到文件
 		if err := config.SaveServerConfig(ws.configPath, &newConfig); err != nil {
 			log.Printf("[WebServer] Failed to save config: %v", err)

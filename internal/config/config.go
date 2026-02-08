@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	"xpenetration/internal/protocol"
 
@@ -274,6 +276,113 @@ func ValidateServerConfig(cfg *ServerConfig) []string {
 	}
 
 	return errors
+}
+
+// CheckPortsAvailability 检查新配置中的端口是否被系统其他程序占用
+// currentCfg 为当前正在运行的配置，其中已占用的端口属于本服务，无需检查
+// 返回被占用端口的描述列表（空表示全部可用）
+func CheckPortsAvailability(newCfg *ServerConfig, currentCfg *ServerConfig) []string {
+	var conflicts []string
+
+	// 收集当前服务已占用的端口（这些端口在重启时会被释放，无需检查）
+	ownedPorts := make(map[int]bool)
+	if currentCfg != nil {
+		ownedPorts[currentCfg.Server.ControlPort] = true
+		ownedPorts[currentCfg.Server.UDPPort] = true
+		ownedPorts[currentCfg.Server.WebPort] = true
+		for _, client := range currentCfg.Clients {
+			for _, tunnel := range client.Tunnels {
+				if tunnel.ServerPort > 0 {
+					ownedPorts[tunnel.ServerPort] = true
+				}
+			}
+		}
+	}
+
+	// 收集新配置中需要检查的端口
+	type portInfo struct {
+		Port     int
+		Name     string
+		Protocol string // "tcp", "udp", "both"
+	}
+	var portsToCheck []portInfo
+
+	// 服务端端口
+	if newCfg.Server.ControlPort > 0 {
+		portsToCheck = append(portsToCheck, portInfo{newCfg.Server.ControlPort, "控制端口", "tcp"})
+	}
+	if newCfg.Server.UDPPort > 0 {
+		portsToCheck = append(portsToCheck, portInfo{newCfg.Server.UDPPort, "UDP传输端口", "udp"})
+	}
+	if newCfg.Server.WebPort > 0 {
+		portsToCheck = append(portsToCheck, portInfo{newCfg.Server.WebPort, "Web管理端口", "tcp"})
+	}
+
+	// 隧道端口
+	for _, client := range newCfg.Clients {
+		for _, tunnel := range client.Tunnels {
+			if tunnel.ServerPort > 0 {
+				proto := "tcp"
+				if strings.EqualFold(tunnel.Protocol, "udp") {
+					proto = "udp"
+				}
+				name := fmt.Sprintf("隧道 \"%s/%s\"", client.Name, tunnel.Name)
+				portsToCheck = append(portsToCheck, portInfo{tunnel.ServerPort, name, proto})
+			}
+		}
+	}
+
+	// 去重：同一端口只检查一次
+	checked := make(map[int]bool)
+	for _, p := range portsToCheck {
+		if checked[p.Port] {
+			continue
+		}
+		checked[p.Port] = true
+
+		// 跳过当前服务自身占用的端口
+		if ownedPorts[p.Port] {
+			continue
+		}
+
+		// 尝试绑定端口，检测是否被其他程序占用
+		addr := fmt.Sprintf(":%d", p.Port)
+		if p.Protocol == "udp" {
+			if conflict := checkUDPPort(addr); conflict != "" {
+				conflicts = append(conflicts, fmt.Sprintf("%s (UDP端口 %d) %s", p.Name, p.Port, conflict))
+			}
+		} else {
+			if conflict := checkTCPPort(addr); conflict != "" {
+				conflicts = append(conflicts, fmt.Sprintf("%s (TCP端口 %d) %s", p.Name, p.Port, conflict))
+			}
+		}
+	}
+
+	return conflicts
+}
+
+// checkTCPPort 尝试监听 TCP 端口，返回空字符串表示可用，否则返回错误描述
+func checkTCPPort(addr string) string {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "已被其他程序占用"
+	}
+	ln.Close()
+	return ""
+}
+
+// checkUDPPort 尝试监听 UDP 端口，返回空字符串表示可用，否则返回错误描述
+func checkUDPPort(addr string) string {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return "地址解析失败"
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return "已被其他程序占用"
+	}
+	conn.Close()
+	return ""
 }
 
 // SaveServerConfig 保存服务端配置
