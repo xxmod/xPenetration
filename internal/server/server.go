@@ -199,6 +199,7 @@ type ClientConn struct {
 	LastHeartbeat     time.Time
 	EncryptionEnabled bool
 	EncryptionKey     []byte
+	UDPAuthKey        []byte     // UDP注册包HMAC认证密钥
 	mu                sync.Mutex // 用于一般操作
 }
 
@@ -410,6 +411,21 @@ func (s *Server) processNativeUDPPacket(data []byte, clientUDPAddr *net.UDPAddr)
 		regPkt, err := protocol.DecodeNativeUDPRegisterPacket(data)
 		if err != nil {
 			log.Printf("[Server] Failed to decode UDP register packet: %v", err)
+			return
+		}
+
+		// 查找已认证的客户端连接，获取其UDP认证密钥
+		s.mu.RLock()
+		clientConn := s.clientsByName[regPkt.ClientName]
+		s.mu.RUnlock()
+		if clientConn == nil {
+			log.Printf("[Server] UDP register rejected: client %s not authenticated", regPkt.ClientName)
+			return
+		}
+
+		// 验证HMAC签名和时间戳
+		if err := protocol.VerifyNativeUDPRegisterPacket(data, clientConn.UDPAuthKey); err != nil {
+			log.Printf("[Server] UDP register HMAC verification failed for client %s: %v", regPkt.ClientName, err)
 			return
 		}
 
@@ -994,6 +1010,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	}
 
 	dataKey := secure.DeriveKeyFromBytes(sharedKey, "data")
+	udpAuthKey := secure.DeriveKeyFromBytes(sharedKey, "udp-auth")
 
 	// 创建客户端连接记录
 	clientConn := &ClientConn{
@@ -1007,6 +1024,7 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		LastHeartbeat:     time.Now(),
 		EncryptionEnabled: encryptionEnabled,
 		EncryptionKey:     dataKey,
+		UDPAuthKey:        udpAuthKey,
 	}
 
 	// 注册客户端

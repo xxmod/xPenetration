@@ -29,6 +29,7 @@ type Client struct {
 	serverUDPAddr     *net.UDPAddr         // 服务端UDP地址
 	encryptionEnabled bool
 	encryptionKey     []byte
+	udpAuthKey        []byte // UDP注册包HMAC认证密钥
 	mu                sync.RWMutex
 	udpMu             sync.RWMutex // UDP专用锁，减少锁竞争
 	running           bool
@@ -137,6 +138,7 @@ func (c *Client) connect() error {
 	dataKey := secure.DeriveKeyFromBytes(sharedKey, "data")
 	controlKey := secure.DeriveKeyFromBytes(sharedKey, "control")
 	c.encryptionKey = dataKey
+	c.udpAuthKey = secure.DeriveKeyFromBytes(sharedKey, "udp-auth")
 	if c.encryptionEnabled {
 		log.Printf("[Client] Payload encryption enabled")
 	}
@@ -540,7 +542,11 @@ func (c *Client) sendUDPRegisterPacket() {
 		return
 	}
 
-	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName)
+	c.mu.RLock()
+	authKey := c.udpAuthKey
+	c.mu.RUnlock()
+
+	registerPkt := protocol.EncodeNativeUDPRegisterPacket(c.config.Client.ClientName, authKey)
 	_, err := conn.WriteToUDP(registerPkt, addr)
 	if err != nil && c.connected {
 		log.Printf("[Client] Warning: Failed to send UDP register packet: %v", err)

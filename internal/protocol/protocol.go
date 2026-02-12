@@ -1,10 +1,13 @@
 package protocol
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"time"
 )
@@ -759,14 +762,19 @@ func DecodeNativeUDPPacket(data []byte) (*NativeUDPPacket, error) {
 	}, nil
 }
 
+// UDPRegisterMaxClockSkew 允许的最大时钟偏差（防重放）
+const UDPRegisterMaxClockSkew = 60 * time.Second
+
 // NativeUDPRegisterPacket 原生UDP注册包结构
-// 格式: [1字节类型=0][1字节客户端名长度][客户端名]
+// 格式: [1字节类型=0][8字节时间戳][1字节客户端名长度][客户端名][32字节HMAC-SHA256]
 type NativeUDPRegisterPacket struct {
 	ClientName string
+	Timestamp  int64
 }
 
-// EncodeNativeUDPRegisterPacket 编码UDP注册包
-func EncodeNativeUDPRegisterPacket(clientName string) []byte {
+// EncodeNativeUDPRegisterPacket 编码带HMAC签名的UDP注册包
+// udpAuthKey 为TCP认证阶段协商的密钥，用于HMAC-SHA256签名
+func EncodeNativeUDPRegisterPacket(clientName string, udpAuthKey []byte) []byte {
 	nameBytes := []byte(clientName)
 	nameLen := len(nameBytes)
 	if nameLen > 255 {
@@ -774,17 +782,29 @@ func EncodeNativeUDPRegisterPacket(clientName string) []byte {
 		nameBytes = nameBytes[:255]
 	}
 
-	buf := make([]byte, 2+nameLen)
-	buf[0] = NativeUDPTypeRegister // 类型: 注册
-	buf[1] = byte(nameLen)
-	copy(buf[2:], nameBytes)
+	// 格式: [1B type][8B timestamp][1B nameLen][name][32B HMAC]
+	hmacSize := sha256.Size // 32 bytes
+	buf := make([]byte, 1+8+1+nameLen+hmacSize)
+	buf[0] = NativeUDPTypeRegister
+	timestamp := time.Now().Unix()
+	binary.BigEndian.PutUint64(buf[1:9], uint64(timestamp))
+	buf[9] = byte(nameLen)
+	copy(buf[10:], nameBytes)
+
+	// 对 [type][timestamp][nameLen][name] 计算HMAC-SHA256
+	signed := buf[:10+nameLen]
+	mac := hmac.New(sha256.New, udpAuthKey)
+	mac.Write(signed)
+	copy(buf[10+nameLen:], mac.Sum(nil))
 
 	return buf
 }
 
-// DecodeNativeUDPRegisterPacket 解码UDP注册包
+// DecodeNativeUDPRegisterPacket 解码UDP注册包（不验证HMAC，仅解析字段）
 func DecodeNativeUDPRegisterPacket(data []byte) (*NativeUDPRegisterPacket, error) {
-	if len(data) < 2 {
+	hmacSize := sha256.Size
+	// 最小长度: 1(type) + 8(ts) + 1(nameLen) + 0(name) + 32(hmac) = 42
+	if len(data) < 1+8+1+hmacSize {
 		return nil, fmt.Errorf("register packet too short: %d bytes", len(data))
 	}
 
@@ -792,14 +812,56 @@ func DecodeNativeUDPRegisterPacket(data []byte) (*NativeUDPRegisterPacket, error
 		return nil, fmt.Errorf("not a register packet: type=%d", data[0])
 	}
 
-	nameLen := int(data[1])
-	if len(data) < 2+nameLen {
-		return nil, fmt.Errorf("register packet too short for name: need %d, have %d", 2+nameLen, len(data))
+	timestamp := int64(binary.BigEndian.Uint64(data[1:9]))
+	nameLen := int(data[9])
+	if len(data) < 10+nameLen+hmacSize {
+		return nil, fmt.Errorf("register packet too short for name+hmac: need %d, have %d", 10+nameLen+hmacSize, len(data))
 	}
 
 	return &NativeUDPRegisterPacket{
-		ClientName: string(data[2 : 2+nameLen]),
+		ClientName: string(data[10 : 10+nameLen]),
+		Timestamp:  timestamp,
 	}, nil
+}
+
+// VerifyNativeUDPRegisterPacket 验证UDP注册包的HMAC签名和时间戳
+// 返回 nil 表示验证通过
+func VerifyNativeUDPRegisterPacket(data []byte, udpAuthKey []byte) error {
+	hmacSize := sha256.Size
+	if len(data) < 1+8+1+hmacSize {
+		return fmt.Errorf("packet too short for HMAC verification")
+	}
+
+	nameLen := int(data[9])
+	expectedLen := 10 + nameLen + hmacSize
+	if len(data) < expectedLen {
+		return fmt.Errorf("packet too short: need %d, have %d", expectedLen, len(data))
+	}
+
+	// 验证时间戳（防重放）
+	timestamp := int64(binary.BigEndian.Uint64(data[1:9]))
+	now := time.Now().Unix()
+	diff := now - timestamp
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > int64(math.Ceil(UDPRegisterMaxClockSkew.Seconds())) {
+		return fmt.Errorf("timestamp expired: diff=%ds", diff)
+	}
+
+	// 验证HMAC
+	signed := data[:10+nameLen]
+	receivedMAC := data[10+nameLen : 10+nameLen+hmacSize]
+
+	mac := hmac.New(sha256.New, udpAuthKey)
+	mac.Write(signed)
+	expectedMAC := mac.Sum(nil)
+
+	if !hmac.Equal(receivedMAC, expectedMAC) {
+		return fmt.Errorf("HMAC verification failed")
+	}
+
+	return nil
 }
 
 // EncodeNativeUDPDataPacket 编码带类型前缀的UDP数据包
