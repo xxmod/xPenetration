@@ -377,6 +377,11 @@ func (ws *WebServer) startWithConfig(cfg *config.ServerConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	if cfg.Server.ListenAddr == "0.0.0.0" {
+		if cfg.Server.WebAuth == nil || cfg.Server.WebAuth.Username == "" || cfg.Server.WebAuth.Password == "" {
+			log.Printf("[WebServer] Warning: Web UI is exposed on 0.0.0.0 without web_auth; configure web_auth or set listen_addr=127.0.0.1")
+		}
+	}
 	handler := ws.basicAuthMiddleware(ws.corsMiddleware(ws.mux))
 	addr := fmt.Sprintf("%s:%d", cfg.Server.ListenAddr, cfg.Server.WebPort)
 
