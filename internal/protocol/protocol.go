@@ -23,6 +23,10 @@ const (
 	MsgTypeConnReady     uint8 = 10 // 连接就绪
 	MsgTypeUDPData       uint8 = 11 // UDP数据传输（通过TCP隧道，备用方法）
 	MsgTypeClientError   uint8 = 12 // 客户端错误上报
+	MsgTypeAuthInit      uint8 = 13 // SPAKE2 认证初始化
+	MsgTypeAuthExchange  uint8 = 14 // SPAKE2 认证交换
+	MsgTypeAuthConfirm   uint8 = 15 // SPAKE2 认证确认
+	MsgTypeAuthResult    uint8 = 16 // SPAKE2 认证结果
 )
 
 // UDP模式常量
@@ -76,6 +80,34 @@ type AuthRequest struct {
 	SecretKey  string `json:"secret_key"`
 	ClientName string `json:"client_name"`
 	Version    string `json:"version"`
+}
+
+// AuthInit SPAKE2 认证初始化
+type AuthInit struct {
+	ClientName string `json:"client_name"`
+	Version    string `json:"version"`
+	ClientMsg  []byte `json:"client_msg"`
+}
+
+// AuthExchange SPAKE2 认证交换
+type AuthExchange struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	ServerMsg []byte `json:"server_msg,omitempty"`
+}
+
+// AuthConfirm SPAKE2 认证确认
+type AuthConfirm struct {
+	ClientConfirm []byte `json:"client_confirm"`
+}
+
+// AuthResult SPAKE2 认证结果
+type AuthResult struct {
+	Success           bool   `json:"success"`
+	Message           string `json:"message"`
+	ClientID          string `json:"client_id"`
+	EncryptionEnabled bool   `json:"encryption_enabled,omitempty"`
+	ServerConfirm     []byte `json:"server_confirm,omitempty"`
 }
 
 // AuthResponse 认证响应
@@ -293,6 +325,72 @@ func NewAuthRequest(secretKey, clientName string) (*Message, error) {
 	}, nil
 }
 
+// NewAuthInit 创建SPAKE2认证初始化消息
+func NewAuthInit(clientName, version string, clientMsg []byte) (*Message, error) {
+	req := AuthInit{
+		ClientName: clientName,
+		Version:    version,
+		ClientMsg:  clientMsg,
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{
+		Type:    MsgTypeAuthInit,
+		Payload: payload,
+	}, nil
+}
+
+// NewAuthExchange 创建SPAKE2认证交换消息
+func NewAuthExchange(success bool, message string, serverMsg []byte) (*Message, error) {
+	resp := AuthExchange{
+		Success:   success,
+		Message:   message,
+		ServerMsg: serverMsg,
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{
+		Type:    MsgTypeAuthExchange,
+		Payload: payload,
+	}, nil
+}
+
+// NewAuthConfirm 创建SPAKE2认证确认消息
+func NewAuthConfirm(clientConfirm []byte) (*Message, error) {
+	confirm := AuthConfirm{ClientConfirm: clientConfirm}
+	payload, err := json.Marshal(confirm)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{
+		Type:    MsgTypeAuthConfirm,
+		Payload: payload,
+	}, nil
+}
+
+// NewAuthResult 创建SPAKE2认证结果消息
+func NewAuthResult(success bool, message, clientID string, encryptionEnabled bool, serverConfirm []byte) (*Message, error) {
+	resp := AuthResult{
+		Success:           success,
+		Message:           message,
+		ClientID:          clientID,
+		EncryptionEnabled: encryptionEnabled,
+		ServerConfirm:     serverConfirm,
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{
+		Type:    MsgTypeAuthResult,
+		Payload: payload,
+	}, nil
+}
+
 // NewAuthResponse 创建认证响应消息
 func NewAuthResponse(success bool, message, clientID string, encryptionEnabled bool) (*Message, error) {
 	resp := AuthResponse{
@@ -447,6 +545,42 @@ func ParseAuthRequest(payload []byte) (*AuthRequest, error) {
 		return nil, err
 	}
 	return &req, nil
+}
+
+// ParseAuthInit 解析SPAKE2认证初始化
+func ParseAuthInit(payload []byte) (*AuthInit, error) {
+	var req AuthInit
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+// ParseAuthExchange 解析SPAKE2认证交换消息
+func ParseAuthExchange(payload []byte) (*AuthExchange, error) {
+	var resp AuthExchange
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ParseAuthConfirm 解析SPAKE2认证确认消息
+func ParseAuthConfirm(payload []byte) (*AuthConfirm, error) {
+	var confirm AuthConfirm
+	if err := json.Unmarshal(payload, &confirm); err != nil {
+		return nil, err
+	}
+	return &confirm, nil
+}
+
+// ParseAuthResult 解析SPAKE2认证结果
+func ParseAuthResult(payload []byte) (*AuthResult, error) {
+	var resp AuthResult
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // ParseAuthResponse 解析认证响应

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/backkem/spake2-go"
 	"github.com/hashicorp/yamux"
 
 	"xpenetration/internal/config"
@@ -33,6 +34,19 @@ type Client struct {
 	running           bool
 	connected         bool
 	stopChan          chan struct{}
+}
+
+const (
+	spakeIdentityServer = "xpenetration-server"
+	spakeAAD            = "xpenetration-spake2-v1"
+)
+
+func spakeOptionsForClient(clientName string) *spake2.Options {
+	options := spake2.DefaultOptions()
+	options.IdentityA = []byte(clientName)
+	options.IdentityB = []byte(spakeIdentityServer)
+	options.AAD = []byte(spakeAAD)
+	return options
 }
 
 // UDPConnInfo UDP连接信息
@@ -112,52 +126,24 @@ func (c *Client) connect() error {
 
 	c.conn = conn
 
-	// 发送认证请求
-	authMsg, err := protocol.NewAuthRequest(c.config.Client.SecretKey, c.config.Client.ClientName)
+	clientID, encryptionEnabled, sharedKey, err := c.performPAKEAuth(conn)
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("failed to create auth request: %v", err)
+		return err
 	}
 
-	if err := protocol.SendMessage(conn, authMsg); err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to send auth request: %v", err)
-	}
-
-	// 接收认证响应
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	msg, err := protocol.DecodeMessage(conn)
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to receive auth response: %v", err)
-	}
-
-	if msg.Type != protocol.MsgTypeAuthResp {
-		conn.Close()
-		return fmt.Errorf("unexpected message type: %d", msg.Type)
-	}
-
-	authResp, err := protocol.ParseAuthResponse(msg.Payload)
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("failed to parse auth response: %v", err)
-	}
-
-	if !authResp.Success {
-		conn.Close()
-		return fmt.Errorf("authentication failed: %s", authResp.Message)
-	}
-
-	c.clientID = authResp.ClientID
-	c.encryptionEnabled = authResp.EncryptionEnabled
-	c.encryptionKey = secure.DeriveKey(c.config.Client.SecretKey)
+	c.clientID = clientID
+	c.encryptionEnabled = encryptionEnabled
+	dataKey := secure.DeriveKeyFromBytes(sharedKey, "data")
+	controlKey := secure.DeriveKeyFromBytes(sharedKey, "control")
+	c.encryptionKey = dataKey
 	if c.encryptionEnabled {
 		log.Printf("[Client] Payload encryption enabled")
 	}
 	log.Printf("[Client] Authentication successful, client ID: %s", c.clientID)
 
 	// 接收隧道配置
-	msg, err = protocol.DecodeMessage(conn)
+	msg, err := protocol.DecodeMessage(conn)
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to receive tunnel config: %v", err)
@@ -210,7 +196,12 @@ func (c *Client) connect() error {
 		session.Close()
 		return fmt.Errorf("failed to open control stream: %v", err)
 	}
-	c.controlStream = controlStream
+	securedControl, err := secure.WrapConn(controlStream, controlKey)
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to secure control stream: %v", err)
+	}
+	c.controlStream = securedControl
 
 	c.connected = true
 
@@ -232,6 +223,75 @@ func (c *Client) connect() error {
 	go c.heartbeatLoop()
 
 	return nil
+}
+
+func (c *Client) performPAKEAuth(conn net.Conn) (string, bool, []byte, error) {
+	spakeClient := spake2.NewClient([]byte(c.config.Client.SecretKey), spakeOptionsForClient(c.config.Client.ClientName))
+	clientMsg, err := spakeClient.Start()
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to start SPAKE2: %v", err)
+	}
+
+	authInit, err := protocol.NewAuthInit(c.config.Client.ClientName, "1.0.0", clientMsg)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to create auth init: %v", err)
+	}
+	if err := protocol.SendMessage(conn, authInit); err != nil {
+		return "", false, nil, fmt.Errorf("failed to send auth init: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	msg, err := protocol.DecodeMessage(conn)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to receive auth exchange: %v", err)
+	}
+	if msg.Type != protocol.MsgTypeAuthExchange {
+		return "", false, nil, fmt.Errorf("unexpected auth message type: %d", msg.Type)
+	}
+	exchange, err := protocol.ParseAuthExchange(msg.Payload)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to parse auth exchange: %v", err)
+	}
+	if !exchange.Success {
+		return "", false, nil, fmt.Errorf("authentication failed: %s", exchange.Message)
+	}
+
+	clientConfirm, err := spakeClient.Finish(exchange.ServerMsg)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to finish SPAKE2: %v", err)
+	}
+	confirmMsg, err := protocol.NewAuthConfirm(clientConfirm)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to create auth confirm: %v", err)
+	}
+	if err := protocol.SendMessage(conn, confirmMsg); err != nil {
+		return "", false, nil, fmt.Errorf("failed to send auth confirm: %v", err)
+	}
+
+	resultMsg, err := protocol.DecodeMessage(conn)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to receive auth result: %v", err)
+	}
+	if resultMsg.Type != protocol.MsgTypeAuthResult {
+		return "", false, nil, fmt.Errorf("unexpected auth result type: %d", resultMsg.Type)
+	}
+	result, err := protocol.ParseAuthResult(resultMsg.Payload)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to parse auth result: %v", err)
+	}
+	if !result.Success {
+		return "", false, nil, fmt.Errorf("authentication failed: %s", result.Message)
+	}
+	if err := spakeClient.Verify(result.ServerConfirm); err != nil {
+		return "", false, nil, fmt.Errorf("authentication failed: %v", err)
+	}
+	sharedKey, err := spakeClient.SharedKey()
+	if err != nil {
+		return "", false, nil, fmt.Errorf("failed to derive shared key: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Time{})
+	return result.ClientID, result.EncryptionEnabled, sharedKey, nil
 }
 
 // heartbeatLoop 心跳循环

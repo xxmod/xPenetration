@@ -20,6 +20,17 @@ func DeriveKey(secret string) []byte {
 	return sum[:]
 }
 
+// DeriveKeyFromBytes generates a 32-byte key from raw secret bytes with optional context.
+func DeriveKeyFromBytes(secret []byte, context string) []byte {
+	h := sha256.New()
+	h.Write(secret)
+	if context != "" {
+		h.Write([]byte{0})
+		h.Write([]byte(context))
+	}
+	return h.Sum(nil)
+}
+
 // EncryptBytes encrypts the given plaintext with a random nonce and returns nonce||ciphertext.
 func EncryptBytes(plaintext, key []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.New(key)

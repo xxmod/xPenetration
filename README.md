@@ -67,7 +67,7 @@ bin/xpen-client -c client.yaml
 也可以只用命令行参数：
 
 ```bash
-bin/xpen-client -s <server_addr> -p 7000 -k <secret_key> -n <client_name>
+bin/xpen-client -s <server_addr> -p <server_port> -k <secret_key> -n <client_name>
 ```
 
 ## 配置要点

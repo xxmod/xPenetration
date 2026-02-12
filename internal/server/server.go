@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/backkem/spake2-go"
 	"github.com/hashicorp/yamux"
 
 	"xpenetration/internal/config"
@@ -27,6 +28,19 @@ type LogWriter struct {
 	server    *Server
 	original  io.Writer
 	logRegexp *regexp.Regexp
+}
+
+const (
+	spakeIdentityServer = "xpenetration-server"
+	spakeAAD            = "xpenetration-spake2-v1"
+)
+
+func spakeOptionsForClient(clientName string) *spake2.Options {
+	options := spake2.DefaultOptions()
+	options.IdentityA = []byte(clientName)
+	options.IdentityB = []byte(spakeIdentityServer)
+	options.AAD = []byte(spakeAAD)
+	return options
 }
 
 // NewLogWriter 创建新的日志写入器
@@ -825,27 +839,28 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		return
 	}
 
-	if msg.Type != protocol.MsgTypeAuth {
-		log.Printf("[Server] Expected auth message, got type %d", msg.Type)
-		s.sendError(conn, 1, "Expected authentication message")
+	if msg.Type != protocol.MsgTypeAuthInit {
+		log.Printf("[Server] Expected SPAKE2 auth init, got type %d", msg.Type)
+		s.sendError(conn, 1, "Expected SPAKE2 authentication init")
 		conn.Close()
 		return
 	}
 
-	// 解析认证请求
-	authReq, err := protocol.ParseAuthRequest(msg.Payload)
+	// 解析SPAKE2认证初始化
+	authInit, err := protocol.ParseAuthInit(msg.Payload)
 	if err != nil {
-		log.Printf("[Server] Failed to parse auth request: %v", err)
-		s.sendError(conn, 2, "Invalid authentication request")
+		log.Printf("[Server] Failed to parse auth init: %v", err)
+		s.sendError(conn, 2, "Invalid authentication init")
 		conn.Close()
 		return
 	}
 
-	// 验证密钥
-	clientConfig := s.findClientConfig(authReq.ClientName)
+	// 验证客户端
+	clientConfig := s.findClientConfig(authInit.ClientName)
 	if clientConfig == nil {
-		log.Printf("[Server] Unknown client: %s", authReq.ClientName)
-		s.sendAuthResponse(conn, false, "Unknown client", "", false)
+		log.Printf("[Server] Unknown client: %s", authInit.ClientName)
+		resp, _ := protocol.NewAuthExchange(false, "Unknown client", nil)
+		protocol.SendMessage(conn, resp)
 		conn.Close()
 		return
 	}
@@ -856,26 +871,84 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		expectedKey = s.config.Server.SecretKey
 	}
 
-	if authReq.SecretKey != expectedKey {
-		log.Printf("[Server] Invalid secret key from client: %s", authReq.ClientName)
-		s.sendAuthResponse(conn, false, "Invalid secret key", "", false)
+	serverSPAKE := spake2.NewServer([]byte(expectedKey), spakeOptionsForClient(authInit.ClientName))
+	serverMsg, err := serverSPAKE.Exchange(authInit.ClientMsg)
+	if err != nil {
+		log.Printf("[Server] SPAKE2 exchange failed for client %s: %v", authInit.ClientName, err)
+		resp, _ := protocol.NewAuthExchange(false, "Authentication exchange failed", nil)
+		protocol.SendMessage(conn, resp)
+		conn.Close()
+		return
+	}
+
+	resp, err := protocol.NewAuthExchange(true, "ok", serverMsg)
+	if err != nil {
+		log.Printf("[Server] Failed to create auth exchange response: %v", err)
+		conn.Close()
+		return
+	}
+	if err := protocol.SendMessage(conn, resp); err != nil {
+		log.Printf("[Server] Failed to send auth exchange: %v", err)
+		conn.Close()
+		return
+	}
+
+	// 接收客户端确认
+	confirmMsg, err := protocol.DecodeMessage(conn)
+	if err != nil {
+		log.Printf("[Server] Failed to read auth confirm: %v", err)
+		conn.Close()
+		return
+	}
+	if confirmMsg.Type != protocol.MsgTypeAuthConfirm {
+		log.Printf("[Server] Expected auth confirm, got type %d", confirmMsg.Type)
+		s.sendError(conn, 3, "Expected authentication confirm")
+		conn.Close()
+		return
+	}
+	confirm, err := protocol.ParseAuthConfirm(confirmMsg.Payload)
+	if err != nil {
+		log.Printf("[Server] Failed to parse auth confirm: %v", err)
+		s.sendError(conn, 4, "Invalid authentication confirm")
+		conn.Close()
+		return
+	}
+	serverConfirm, err := serverSPAKE.Confirm(confirm.ClientConfirm)
+	if err != nil {
+		log.Printf("[Server] SPAKE2 confirm failed for client %s: %v", authInit.ClientName, err)
+		finalMsg, _ := protocol.NewAuthResult(false, "Authentication failed", "", false, nil)
+		protocol.SendMessage(conn, finalMsg)
+		conn.Close()
+		return
+	}
+	sharedKey, err := serverSPAKE.SharedKey()
+	if err != nil {
+		log.Printf("[Server] SPAKE2 shared key failed for client %s: %v", authInit.ClientName, err)
+		finalMsg, _ := protocol.NewAuthResult(false, "Authentication failed", "", false, nil)
+		protocol.SendMessage(conn, finalMsg)
 		conn.Close()
 		return
 	}
 
 	// 生成客户端ID
-	clientID := fmt.Sprintf("%s-%d", authReq.ClientName, time.Now().UnixNano())
+	clientID := fmt.Sprintf("%s-%d", authInit.ClientName, time.Now().UnixNano())
 
 	// 清除读取超时
 	conn.SetReadDeadline(time.Time{})
 
-	log.Printf("[Server] Client authenticated: %s (ID: %s)", authReq.ClientName, clientID)
+	log.Printf("[Server] Client authenticated: %s (ID: %s)", authInit.ClientName, clientID)
 
 	encryptionEnabled := s.config.Server.Encryption.Enabled
 
-	// 发送认证成功响应
-	if err := s.sendAuthResponse(conn, true, "Authentication successful", clientID, encryptionEnabled); err != nil {
-		log.Printf("[Server] Failed to send auth response: %v", err)
+	// 发送认证结果
+	finalMsg, err := protocol.NewAuthResult(true, "Authentication successful", clientID, encryptionEnabled, serverConfirm)
+	if err != nil {
+		log.Printf("[Server] Failed to create auth result: %v", err)
+		conn.Close()
+		return
+	}
+	if err := protocol.SendMessage(conn, finalMsg); err != nil {
+		log.Printf("[Server] Failed to send auth result: %v", err)
 		conn.Close()
 		return
 	}
@@ -912,35 +985,43 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 		return
 	}
 
-	encryptionKey := secure.DeriveKey(expectedKey)
+	controlKey := secure.DeriveKeyFromBytes(sharedKey, "control")
+	securedControl, err := secure.WrapConn(controlStream, controlKey)
+	if err != nil {
+		log.Printf("[Server] Failed to secure control stream: %v", err)
+		session.Close()
+		return
+	}
+
+	dataKey := secure.DeriveKeyFromBytes(sharedKey, "data")
 
 	// 创建客户端连接记录
 	clientConn := &ClientConn{
 		ID:                clientID,
-		Name:              authReq.ClientName,
+		Name:              authInit.ClientName,
 		Conn:              conn,
 		Session:           session,
-		ControlStream:     controlStream,
+		ControlStream:     securedControl,
 		Tunnels:           clientConfig.Tunnels,
 		ConnectedAt:       time.Now(),
 		LastHeartbeat:     time.Now(),
 		EncryptionEnabled: encryptionEnabled,
-		EncryptionKey:     encryptionKey,
+		EncryptionKey:     dataKey,
 	}
 
 	// 注册客户端
 	s.mu.Lock()
 	// 断开同名的旧连接
-	if oldClient, exists := s.clientsByName[authReq.ClientName]; exists {
-		log.Printf("[Server] Disconnecting old connection for client: %s", authReq.ClientName)
+	if oldClient, exists := s.clientsByName[authInit.ClientName]; exists {
+		log.Printf("[Server] Disconnecting old connection for client: %s", authInit.ClientName)
 		oldClient.Close()
 		delete(s.clients, oldClient.ID)
 	}
 	s.clients[clientID] = clientConn
-	s.clientsByName[authReq.ClientName] = clientConn
+	s.clientsByName[authInit.ClientName] = clientConn
 	s.mu.Unlock()
 
-	log.Printf("[Server] Client yamux session established: %s", authReq.ClientName)
+	log.Printf("[Server] Client yamux session established: %s", authInit.ClientName)
 
 	// 处理控制流消息（心跳等）
 	s.handleControlStream(clientConn)
@@ -949,12 +1030,12 @@ func (s *Server) handleClientConnection(conn net.Conn) {
 	clientConn.Close()
 	s.mu.Lock()
 	delete(s.clients, clientID)
-	if s.clientsByName[authReq.ClientName] == clientConn {
-		delete(s.clientsByName, authReq.ClientName)
+	if s.clientsByName[authInit.ClientName] == clientConn {
+		delete(s.clientsByName, authInit.ClientName)
 	}
 	s.mu.Unlock()
 
-	log.Printf("[Server] Client disconnected: %s", authReq.ClientName)
+	log.Printf("[Server] Client disconnected: %s", authInit.ClientName)
 }
 
 // findClientConfig 查找客户端配置
